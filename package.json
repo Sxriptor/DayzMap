@@ -1,0 +1,34 @@
+{
+  "name": "dayz-map-desk",
+  "version": "1.0.0",
+  "description": "A lightweight offline DayZ Nasdara map with global controls",
+  "main": "src/main.js",
+  "author": "DayZ Map Desk",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "build:nasdara": "electron tools/build-nasdara.js",
+    "pack:export-mod": "node tools/pack-mod.js",
+    "test": "node --test --test-isolation=none",
+    "dist:win": "electron-builder --win portable"
+  },
+  "devDependencies": {
+    "electron": "^42.0.0",
+    "electron-builder": "^26.0.12",
+    "three": "^0.150.1"
+  },
+  "build": {
+    "appId": "local.dayz.mapdesk",
+    "productName": "DayZ Map Desk",
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": "portable"
+    },
+    "directories": {
+      "output": "dist"
+    }
+  }
+}
