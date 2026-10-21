@@ -15,7 +15,7 @@ Build a portable Windows executable with `npm run dist:win`. Output is in `dist/
 
 ## Offline Nasdara map
 
-Nasdara is drawn locally: no internet, no web map library, about 8 MB of tiles and a ~470 KB data file. Build it once (and again after DayZ updates) with DayZ and the Nasdara DLC installed:
+Nasdara is drawn locally: no internet, no web map library, about 80 MB of tiles on disk (67 MB of it the full-resolution satellite; only tiles on screen are loaded) and a ~520 KB data file. The build takes about a minute. Build it once (and again after DayZ updates) with DayZ and the Nasdara DLC installed:
 
 ```powershell
 npm run build:nasdara
@@ -26,7 +26,7 @@ npm run build:nasdara -- "D:SteamLibrarysteamappscommonDayZ"
 The script reads only unencrypted game files and writes `src/map/nasdara/` (git-ignored; it is Bohemia's game data, so do not redistribute it):
 
 - **Base map**: the in-game paper map (`map_unfolded_nasdara_co.paa`): roads, contours, grid and town/landmark names. No satellite imagery. The printed names and grid numbers are lifted off the image by colour (no text recognition) into `labels.png`, so they stay upright when the map is rotated. Single symbols and the odd stray mark stay painted on the map.
-- **Base map choice**: Paper map, **Satellite** (stitched from the 1,849 terrain satellite tiles in `worlds_nasdara_data.pbo`, 4 m/px) or plain White, under Layers → Base map.
+- **Base map choice**: Paper map, **Satellite** (stitched from the 1,849 terrain satellite tiles in `worlds_nasdara_data.pbo`, down to their full 1 m/px when zoomed in) or plain White, under Layers → Base map.
 - **Shaded relief and terrain heights**: the terrain normal map (`global_nohq.paa`) gives hill shading, and is integrated into a 512 × 512 height grid pinned to the 13,719 building heights in `mapgrouppos.xml` (about 3 m error on held-out buildings). The cursor readout shows ground height.
 - **Optional 3D view** (3D button, top right): that terrain draped with the chosen base map and overlays, upright place names and the enabled markers. three.js (`src/map/vendor`, MIT) loads only when 3D is opened. Drag to pan, right-drag (or Ctrl+drag) to turn and tilt, wheel to zoom; the numpad keys work the same as in 2D, and the compass faces north.
 - **Main roads**: the widest printed roads (highway, boulevards, main streets) redrawn bold. The paper map draws ordinary roads and dirt tracks the same way, so those are not split further.

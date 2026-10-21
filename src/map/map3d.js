@@ -50,10 +50,12 @@ window.Map3D = (() => {
   // Chosen base map (2048 px tiles, or white) with the enabled map overlays, composed into one texture.
   // Shaded relief is left out: the 3D lighting already shades the slopes.
   async function updateTexture() {
-    const W = 2048, c = document.createElement('canvas'); c.width = c.height = W;
-    const g = c.getContext('2d'), n1 = data.levels[1], span = W / n1;
+    // 4096 px (4 m/px) where the GPU allows it, else 2048 px.
+    const big = renderer.capabilities.maxTextureSize >= 4096, L = big ? 2 : 1, W = big ? 4096 : 2048;
+    const c = document.createElement('canvas'); c.width = c.height = W;
+    const g = c.getContext('2d'), n1 = data.levels[L], span = W / n1;
     const tilesOf = kind => Promise.all([...Array(n1 * n1)].map((_, i) =>
-      load(`nasdara/${kind}/1/${i % n1}_${(i / n1) | 0}.${kind === 'tiles' || kind === 'sat' ? 'jpg' : 'png'}`).then(img => [i, img]).catch(() => null)));
+      load(`nasdara/${kind}/${L}/${i % n1}_${(i / n1) | 0}.${kind === 'tiles' || kind === 'sat' ? 'jpg' : 'png'}`).then(img => [i, img]).catch(() => null)));
     if (base === 'white') { g.fillStyle = '#fff'; g.fillRect(0, 0, W, W); }
     else for (const t of await tilesOf(baseKind())) if (t) g.drawImage(t[1], (t[0] % n1) * span, ((t[0] / n1) | 0) * span, span, span);
     for (const [layer, kind] of [['topo', 'contours'], ['mainroads', 'roads']]) if (layers[layer])

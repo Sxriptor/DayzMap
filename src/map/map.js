@@ -55,11 +55,19 @@ function tile(kind, level, tx, ty) {
   if (img) { tiles.delete(key); tiles.set(key, img); return img.complete && img.naturalWidth ? img : null; }
   img = new Image(); img.onload = redraw; img.src = `nasdara/${key}.${kind === 'tiles' || kind === 'sat' ? 'jpg' : 'png'}`;
   tiles.set(key, img);
-  if (tiles.size > 160) tiles.delete(tiles.keys().next().value);
+  // About two screens of 512 px tiles; older ones are dropped so deep zooming stays light on memory.
+  if (tiles.size > 64) tiles.delete(tiles.keys().next().value);
   return null;
 }
+// Satellite has two extra, sharper levels (2 and 1 m/px); paper map and overlays stop at 4 m/px.
+const levelsOf = kind => (kind === 'sat' && data.satLevels) || data.levels;
+// Smallest level that is sharp at the current zoom, else the sharpest there is.
+function levelFor(kind) {
+  const list = levelsOf(kind), i = list.findIndex(n => n * data.tile / data.size >= view.s * dpr * 0.85);
+  return i < 0 ? list.length - 1 : i;
+}
 function drawLevel(level, need, kind = 'tiles') {
-  const n = data.levels[level], span = data.size / n;
+  const n = levelsOf(kind)[level], span = data.size / n;
   const corners = [toWorld(0, 0), toWorld(W, 0), toWorld(0, H), toWorld(W, H)];
   const x0 = Math.min(...corners.map(c => c[0])), x1 = Math.max(...corners.map(c => c[0]));
   const z0 = Math.min(...corners.map(c => c[1])), z1 = Math.max(...corners.map(c => c[1]));
@@ -79,8 +87,7 @@ function draw() {
   ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
   ctx.translate(W / 2, H / 2); ctx.rotate(view.r); ctx.translate(-W / 2, -H / 2);
   // Pick the smallest tile level that is sharp at this zoom; level 0 underneath while it loads.
-  const target = data.levels.findIndex(n => n * data.tile / data.size >= view.s * dpr * 0.85);
-  const level = target < 0 ? data.levels.length - 1 : target;
+  const level = levelFor(baseKind()), overlay = levelFor('contours');
   if (base === 'white') {
     const [sx, sy] = toScreen(0, data.size); ctx.fillStyle = '#fff'; ctx.fillRect(sx, sy, data.size * view.s, data.size * view.s);
   } else {
@@ -88,8 +95,11 @@ function draw() {
     drawLevel(level, true, baseKind());
   }
   if (layers.relief && reliefImage?.complete) { const [sx, sy] = toScreen(0, data.size); ctx.drawImage(reliefImage, sx, sy, data.size * view.s, data.size * view.s); }
-  if (layers.topo) drawLevel(level, false, 'contours');
-  if (layers.mainroads) drawLevel(level, false, 'roads');
+  if (layers.topo) drawLevel(overlay, false, 'contours');
+  // The bold road trace is 4 m/px; past 2 m/px it only smudges over the real road, so it fades out.
+  if (layers.mainroads && view.s < 0.5) {
+    ctx.globalAlpha = Math.min(1, (0.5 - view.s) / 0.25); drawLevel(overlay, false, 'roads'); ctx.globalAlpha = 1;
+  }
   if (layers.tiers && tierImage?.complete) {
     const [sx, sy] = toScreen(0, data.size);
     ctx.imageSmoothingEnabled = false; ctx.drawImage(tierImage, sx, sy, data.size * view.s, data.size * view.s); ctx.imageSmoothingEnabled = true;

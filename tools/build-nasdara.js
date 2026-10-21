@@ -9,6 +9,7 @@ const { extractLabels, packAtlas } = require('./labels');
 const { contourStrength, mainRoads } = require('./topo');
 const { buildHeights } = require('./terrain');
 const { parseExport, powerlines, signs } = require('./objects');
+const { satelliteTiles } = require('./satellite');
 
 // Each building is STRIDE numbers: type index, x, z, tier bits, area usage bits.
 const SIZE = 16384, TILE = 512, STRIDE = 5;
@@ -131,14 +132,24 @@ function build() {
       }
     }
   }
-  dataPbo.close();
   const satImage = toImage(sat, satSize, satSize);
   let satBytes = 0;
   for (const level of [0, 1, 2]) {
     const w = satSize >> (2 - level);
     satBytes += writeTiles(level === 2 ? satImage : satImage.resize({ width: w, quality: 'best' }), level, 'sat');
   }
-  console.log(`satellite ${satTiles.length} source tiles, ${(satBytes / 1048576).toFixed(1)} MB`);
+  // Sharper satellite levels 3 (2 m/px) and 4 (1 m/px, the source resolution) from the full-size textures.
+  const sources = satTiles.map(([name, col, row]) => ({ name, col: +col, row: +row }));
+  satelliteTiles(sources, name => { const { w, rgba } = readPaa(dataPbo.read(name)).decode(0); return { w, rgba }; },
+    SIZE, TILE, (offset, tx, ty, rgba) => {
+      const dir = path.join(OUT, 'sat', String(4 - offset));
+      fs.mkdirSync(dir, { recursive: true });
+      const jpg = toImage(rgba, TILE, TILE).toJPEG(72);
+      fs.writeFileSync(path.join(dir, `${tx}_${ty}.jpg`), jpg); satBytes += jpg.length;
+    });
+  dataPbo.close();
+  const satLevels = [0, 1, 2, 3, 4].map(level => (satSize >> 2 << level) / TILE);
+  console.log(`satellite ${satTiles.length} source tiles, levels ${satLevels.join('/')} tiles across, ${(satBytes / 1048576).toFixed(1)} MB`);
   const groundPoints = [...text('mapgrouppos.xml').matchAll(/pos="([\d.]+) ([\d.-]+) ([\d.]+)"/g)].map(m => [+m[1], +m[2], +m[3]]);
   const terrain = buildHeights(normals.rgba, normals.w, SIZE, groundPoints, 512);
   // Shaded relief: darkening only, so the paper map underneath keeps its colours.
@@ -266,7 +277,7 @@ function build() {
     `spawns ${spawns.length} (${spawnTier1} in Tier1)`);
   if (spawnTier1 < spawns.length * 0.5) throw new Error('tier raster orientation check failed');
 
-  const data = { name: 'Nasdara', size: SIZE, tile: TILE, levels, labels, labelScale: metersPerPixel, terrain: { size: terrain.n, low: Math.round(low), high: Math.round(high) }, usages: USAGES, stride: STRIDE, types, buildings, items, events, zones, spawns, zoneTypes, infected, animals, underground, power, signs: signList };
+  const data = { name: 'Nasdara', size: SIZE, tile: TILE, levels, satLevels, labels, labelScale: metersPerPixel, terrain: { size: terrain.n, low: Math.round(low), high: Math.round(high) }, usages: USAGES, stride: STRIDE, types, buildings, items, events, zones, spawns, zoneTypes, infected, animals, underground, power, signs: signList };
   fs.writeFileSync(path.join(OUT, 'data.js'), `window.MAP_DATA=${JSON.stringify(data)};\n`);
   console.log(`data.js ${(fs.statSync(path.join(OUT, 'data.js')).size / 1024).toFixed(0)} KB -> ${OUT}`);
 }
