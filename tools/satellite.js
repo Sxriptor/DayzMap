@@ -1,11 +1,11 @@
 // Full-resolution satellite tiles straight from the terrain's layers/S_<col>_<row>_lco.paa textures:
-// each is 512 px = 512 m, repeating every 384 m with 64 px of overlap on each side, row 0 at the north
-// edge. Output tiles of `tile` px at 1 m/px (and a 2 m/px level averaged from them) are produced one row at
-// a time, so the 16384 px mosaic never has to exist in memory.
-const STEP = 384, EDGE = 64;
+// each is 512 px = 512 m, repeating every `step` m with `edge` px of overlap on each side (Nasdara 384 / 64,
+// Chernarus and Sakhal 480 / 16; see layerGrid in build-map.js), row 0 at the north edge. Output tiles of
+// `tile` px at 1 m/px (and a 2 m/px level averaged from them) are produced one row at a time, so the full
+// mosaic never has to exist in memory.
 
 // writeTile(levelOffset, tx, ty, rgba): levelOffset 0 = full resolution, 1 = half resolution.
-function satelliteTiles(sources, decode, size, tile, writeTile) {
+function satelliteTiles(sources, decode, size, tile, writeTile, { step: STEP = 384, edge: EDGE = 64 } = {}) {
   const n = size / tile, rows = new Map(); // source row -> decoded RGBA by column
   const sourceRow = r => {
     if (!rows.has(r)) rows.set(r, new Map(sources.filter(s => s.row === r).map(s => [s.col, decode(s.name)])));

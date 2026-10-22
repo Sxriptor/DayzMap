@@ -1,13 +1,14 @@
 {
   "name": "dayz-map-desk",
   "version": "1.0.0",
-  "description": "A lightweight offline DayZ Nasdara map with global controls",
+  "description": "A lightweight offline DayZ map (Chernarus, Frostline, Nasdara) with global controls",
   "main": "src/main.js",
   "author": "DayZ Map Desk",
   "license": "MIT",
   "scripts": {
     "start": "electron .",
-    "build:nasdara": "electron tools/build-nasdara.js",
+    "build:map": "electron tools/build-map.js",
+    "build:nasdara": "electron tools/build-map.js nasdara",
     "pack:export-mod": "node tools/pack-mod.js",
     "test": "node --test --test-isolation=none",
     "dist:win": "electron-builder --win portable"

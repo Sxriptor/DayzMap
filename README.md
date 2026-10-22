@@ -1,6 +1,6 @@
 # DayZ Map Desk
 
-A small Windows Electron companion with an offline DayZ Nasdara map built from your own DayZ install. Unofficial; map and game data remain © Bohemia Interactive. No internet, game integration or automatic player tracking.
+A small Windows Electron companion with offline DayZ maps (Chernarus, Frostline/Sakhal and Nasdara) built from your own DayZ install. Unofficial; map and game data remain © Bohemia Interactive. No internet, game integration or automatic player tracking.
 
 ## Run
 
@@ -13,17 +13,25 @@ npm start
 
 Build a portable Windows executable with `npm run dist:win`. Output is in `dist/`.
 
-## Offline Nasdara map
+## Offline maps
 
-Nasdara is drawn locally: no internet, no web map library, about 80 MB of tiles on disk (67 MB of it the full-resolution satellite; only tiles on screen are loaded) and a ~520 KB data file. The build takes about a minute. Build it once (and again after DayZ updates) with DayZ and the Nasdara DLC installed:
+Each map is drawn locally: no internet, no web map library, roughly 40-80 MB of tiles on disk per map (most of it the full-resolution satellite; only tiles on screen are loaded) and a data file of a few MB. Build them once (and again after DayZ updates) with DayZ installed; each map takes a minute or two:
 
 ```powershell
-npm run build:nasdara
-# or, if DayZ is not in a Steam library this script can find:
-npm run build:nasdara -- "D:SteamLibrarysteamappscommonDayZ"
+npm run build:map                  # every installed map: Nasdara, Chernarus, Frostline (Sakhal)
+npm run build:map -- sakhal        # just one: nasdara, chernarusplus or sakhal (build:nasdara is a shortcut)
+npm run build:map -- "D:\SteamLibrary\steamapps\common\DayZ"   # if DayZ is not in a Steam library the script finds
 ```
 
-The script reads only unencrypted game files and writes `src/map/nasdara/` (git-ignored; it is Bohemia's game data, so do not redistribute it):
+The script reads only unencrypted game files and writes `src/map/<map>/`, plus `src/map/maps.js`, the list of built maps. These are git-ignored: it is Bohemia's game data, so do not redistribute it. Switch maps under Layers → Map; each map keeps its own view, base map and layers.
+
+The maps differ in what their game files hold:
+
+- **Nasdara**: the paper map, with its printed names lifted off as described below.
+- **Frostline (Sakhal)**: the paper map (`map_unfolded_sakhal_co.paa`) as printed. Its busy, colourful style defeats picking out names and contours by colour, so the names rotate with the map and the Topography layer is drawn from the exported terrain. Game place names start hidden there, since the paper already prints them.
+- **Chernarus**: the game files have no paper map texture (the engine draws the in-game map), so its **Topographic** base is drawn from the exported terrain: land, water with its shoreline, forest from the tree export, and contour lines every 10 m (bolder every 50 m). Without an export it falls back to the estimated terrain, which is rough near the sea; Satellite is the better base until then.
+
+What a build contains (Nasdara's figures):
 
 - **Base map**: the in-game paper map (`map_unfolded_nasdara_co.paa`): roads, contours, grid and town/landmark names. No satellite imagery. The printed names and grid numbers are lifted off the image by colour (no text recognition) into `labels.png`, so they stay upright when the map is rotated. Single symbols and the odd stray mark stay painted on the map.
 - **Base map choice**: Paper map, **Satellite** (stitched from the 1,849 terrain satellite tiles in `worlds_nasdara_data.pbo`, down to their full 1 m/px when zoomed in) or plain White, under Layers → Base map.
@@ -34,20 +42,30 @@ The script reads only unencrypted game files and writes `src/map/nasdara/` (git-
 - **Overlays** from the Central Economy (`worlds_nasdara_ce.pbo`): every lootable building by type (military, police, medical, fire, hunting, industrial, civilian, wrecks), vehicle/heli crash/convoy/police car/locked container/water truck spawns, toxic zones, infected zones by type, animal territories (game animals, dogs, small animals), bunker and tunnel entrances (`cfgundergroundtriggers.json`), player spawn areas and the loot tier map.
 - **Loot search**: type an item (e.g. `AKM`) to highlight buildings where the economy can spawn it. A building matches when it or its area shares a usage flag with the item, it has a container accepting the item's category, and its area tier is allowed. This follows the economy files but is not an exact spawn simulation. Attachment/cargo-only spawns are not included.
 
-Not available: road classes, other individual object placements and the searchable town-name list live only in the encrypted world file (`worlds_nasdara.ebo`), which this project does not touch. Town names are still visible on the paper map. Powerlines and road signs can be added with the export below.
+Not in any unencrypted file: individual object placements, the road network, the town-name list and exact heights. The optional world export below reads them from a running server.
 
 Map controls: drag to pan, wheel or double-click to zoom (Shift+double-click zooms out), `/` or Shift+Q to search, Esc clears the search, Ctrl+C copies the cursor's X, Y. The view and layer choices are remembered.
 
-## Powerlines and road signs (optional export)
+## World export (optional server mod)
 
-Their positions are not in any unencrypted file, so a small **server-side mod** reads them from a running DayZ server. It never touches the encrypted world file.
+A small **server-side mod** (`tools/export-mod`) reads what the unencrypted files lack from a running DayZ server, using only the game's own script API. It never touches the encrypted world file. One run adds:
+
+- **Place search**: every named place in the world config (cities, villages, local names, ruins, bays, hills). Type a name in the search box to jump there.
+- **Exact terrain**: the game's ground height every 10 m, replacing the normal-map estimate in 3D and in the cursor readout (8 m grid in 2D).
+- **Roads (surveyed)**: wherever the game has a road surface underfoot, sampled every 4 m. Paved roads are dark grey, gravel and dirt brown, and building floors are left out.
+- **Building outlines**: the true footprint and rotation of every building and larger structure, shown once zoomed in.
+- **Forest**: tree density from every tree and bush.
+- **Wells & water** and **Fuel pumps**: the objects the game itself lets you drink from or refuel at.
+- **Powerlines** and **Road signs**, as before.
 
 1. `npm run pack:export-mod` writes `@NasdaraExport\addons\NasdaraExport.pbo`.
-2. Install **DayZ Server** (Steam → Library → Tools) and set the mission `template` in its `serverDZ.cfg` to the Nasdara mission folder in its `mpmissions` directory.
-3. Start it once: `DayZServer_x64.exe -config=serverDZ.cfg -profiles=profiles -servermod=<full path>\@NasdaraExport`. You do not need to join. When the server log shows `[NasdaraExport] done: ...`, stop the server.
-4. Copy `profiles\nasdara_objects.json` into this project's `exports\` folder and run `npm run build:nasdara`. The **Powerlines** and **Road signs** layers then appear in 2D and 3D.
+2. Install **DayZ Server** (Steam → Library → Tools). Copy its `serverDZ.cfg` (for example to `C:\dzexport\export.cfg`) and set the mission `template` there to the map's mission: `dayzOffline.chernarusplus`, `dayzOffline.sakhal` or `dayzOffline.nasdara`. Keep BattlEye on: without it the server shuts itself down straight after start-up.
+3. From the DayZ Server folder run `DayZServer_x64.exe -config=C:\dzexport\export.cfg -port=2402 -profiles=C:\dzexport -servermod=<full path>\@NasdaraExport`. Use a short profiles path: the server hangs at start-up with a very long one. You do not need to join. The export starts once the mission is up, logs progress (`[NasdaraExport] ...`) to `C:\dzexport\script_*.log`, and the server **shuts itself down when done**. Add `-nasdaraStay` to keep it running.
+4. The files are named after the world (`chernarusplus_objects.json`, `sakhal_terrain.txt`, ...). Copy them from `C:\dzexport\NasdaraExport\` into this project's `exports\<world>\` folder (`exports\chernarusplus\`, `exports\sakhal\` or `exports\nasdara\`) and run `npm run build:map -- <world>`. Only the layers whose files are present are built.
 
-`profiles\nasdara_shapes.txt` lists every model the sweep saw, to check nothing power-related was missed. The mod and the import have unit tests but have not yet been run against a live server.
+Run one server at a time. The Chernarus export peaks at over 6 GB of memory, and running two exports at once on a 16 GB machine killed one of them. Each export takes about 5 minutes.
+
+The export files are plain text. `<world>_shapes.txt` counts every model the sweep saw and `<world>_surfaces.txt` lists every ground surface name, so the road and object filters can be checked.
 
 ## Controls
 
@@ -78,4 +96,4 @@ The map runs sandboxed without Node.js access; its preload only exposes closing 
 
 ## Verify
 
-`npm test` checks preference recovery, the numpad layout, loot matching and search, and (once built) the generated Nasdara data. `npx electron . --smoke` checks the map page, the rotate command path, hide/show unloading, click-through and shortcut registration.
+`npm test` checks preference recovery, the numpad layout, loot matching and search, the world-export importers, and (once built) each map's generated data. `npx electron . --smoke` checks the map page, the rotate command path, hide/show unloading, click-through and shortcut registration.

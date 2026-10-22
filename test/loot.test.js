@@ -32,10 +32,12 @@ test('building type lookup and ranked search', () => {
   assert.deepEqual(search(data, 'mil').map(h => h.label), ['Mil Tower', 'Mil Barracks1']);
   assert.equal(search(data, 'akm')[0].kind, 'item');
 });
-const built = path.join(__dirname, '..', 'src', 'map', 'nasdara', 'data.js');
-test('generated Nasdara data is consistent', { skip: !fs.existsSync(built) && 'run npm run build:nasdara first' }, () => {
+for (const id of ['nasdara', 'chernarusplus', 'sakhal']) {
+const built = path.join(__dirname, '..', 'src', 'map', id, 'data.js');
+test(`generated ${id} data is consistent`, { skip: !fs.existsSync(built) && `run npm run build:map -- ${id} first` }, () => {
   const sandbox = {}; new Function('window', fs.readFileSync(built, 'utf8'))(sandbox);
   const d = sandbox.MAP_DATA;
+  assert.equal(d.id, id);
   assert.equal(d.buildings.length % d.stride, 0);
   for (let i = 0; i < d.buildings.length; i += d.stride) {
     assert.ok(d.types[d.buildings[i]]);
@@ -43,11 +45,18 @@ test('generated Nasdara data is consistent', { skip: !fs.existsSync(built) && 'r
   }
   for (const [level, n] of d.levels.entries()) {
     assert.ok(fs.existsSync(path.join(path.dirname(built), 'tiles', String(level), `${n - 1}_${n - 1}.jpg`)));
-    for (const kind of ['contours', 'roads']) assert.ok(fs.existsSync(path.join(path.dirname(built), kind, String(level), `${n - 1}_${n - 1}.png`)));
+    for (const kind of d.mainroads ? ['contours', 'roads'] : ['contours']) assert.ok(fs.existsSync(path.join(path.dirname(built), kind, String(level), `${n - 1}_${n - 1}.png`)));
   }
-  assert.ok(d.labels.length > 100 && d.labels.every(l => l.length === 6));
+  const top = d.satLevels.length - 1, n = d.satLevels[top];
+  assert.ok(fs.existsSync(path.join(path.dirname(built), 'sat', String(top), `${n - 1}_${n - 1}.jpg`)), 'full-resolution satellite');
+  // Printed names are lifted off Nasdara's paper map only.
+  if (id === 'nasdara') assert.ok(d.labels.length > 100 && d.labels.every(l => l.length === 6));
   assert.ok(d.infected.length > 100 && d.infected.every(([, , , type]) => d.zoneTypes[type]));
-  assert.ok(d.animals.length > 100 && d.underground.length > 10);
-  const akm = d.items.find(i => i.name === 'AKM');
-  assert.ok(akm && lootBuildings(d, akm).length > 0);
+  assert.ok(d.animals.length > 100);
+  if (id === 'nasdara') assert.ok(d.underground.length > 10);
+  // Most world-loot items can be traced to some building (AKM, for one, does not spawn on Sakhal).
+  const found = d.items.filter(item => lootBuildings(d, item).length > 0).length;
+  assert.ok(found > d.items.length / 2, `${found} of ${d.items.length} items found in buildings`);
+  if (d.places) assert.ok(d.places.every(([x, z, name]) => x >= 0 && x <= d.size && z >= 0 && z <= d.size && !/[Ѐ-ӿ]/.test(name)), 'places on the map, in Latin letters');
 });
+}

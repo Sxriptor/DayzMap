@@ -1,7 +1,9 @@
-// Offline Nasdara map: paper-map tiles plus Central Economy overlays on one canvas, redrawn only on change.
+// Offline DayZ map (whichever boot.js picked): base-map tiles plus Central Economy overlays on one canvas, redrawn only on change.
 const $ = id => document.getElementById(id);
 const data = window.MAP_DATA;
-const { lootBuildings, typeBuildings, search, pretty } = window.MapLoot;
+// This map's files and its own saved view, base and layers (Nasdara's keys predate other maps: "nasdara-view").
+const ROOT = window.MAP_ROOT || 'nasdara/', MAP_ID = window.MAP_ID || 'nasdara';
+const { lootBuildings, typeBuildings, search, pretty, eventIcon, sourceIcon } = window.MapLoot;
 const LAYERS = [
   ['Buildings', [['military', 'Military', '#d8352a', true], ['police', 'Police / prison', '#2f6fe0', true],
     ['medical', 'Medical', '#f2f2f2', true], ['fire', 'Fire station', '#ff7b1c', true], ['hunting', 'Hunting', '#7a9a3a', false],
@@ -9,18 +11,24 @@ const LAYERS = [
   ['Events', [['vehicle', 'Vehicles', '#19a974', true], ['heli', 'Heli crashes', '#ff4136', true], ['convoy', 'Military convoys', '#b10dc9', true],
     ['policecar', 'Police cars', '#0074d9', false], ['container', 'Locked containers', '#ffdc00', false], ['watertruck', 'Water trucks', '#7fdbff', false]]],
   ['Map', [['relief', 'Shaded relief', '#5a4632', true], ['topo', 'Topography', '#46321e', true], ['mainroads', 'Main roads', '#d64014', true],
-    ['power', 'Powerlines', '#ffd84a', true], ['signs', 'Road signs', '#f2f2f2', false]]],
+    ['places', 'Place names (game)', '#1d140b', true], ['roadnet', 'Roads (surveyed)', '#3c3c42', true], ['outlines', 'Building outlines', '#2b2b2b', true], ['forest', 'Forest', '#1e6e28', false],
+    ['power', 'Powerlines', '#2b2b2b', true], ['signs', 'Road signs', '#f2f2f2', false], ['water', 'Wells & water', '#2aa1ff', true],
+    ['fuel', 'Fuel pumps', '#ff9f1c', true]]],
   ['Areas', [['zones', 'Toxic zones', '#c5e000', true], ['infected', 'Infected zones', '#8a8a8a', false],
-    ['underground', 'Bunkers & tunnels', '#00d0d0', true], ['game', 'Game animals', '#b5651d', false], ['dogs', 'Dogs', '#5c3a1e', false],
+    ['underground', 'Bunkers & tunnels', '#00d0d0', true], ['game', 'Game animals', '#b5651d', false], ['predators', 'Bears & wolves', '#a01e1e', false], ['dogs', 'Dogs', '#5c3a1e', false],
     ['critters', 'Small animals', '#e0c068', false], ['spawns', 'Player spawns', '#ffffff', false], ['tiers', 'Loot tiers', '#eb8714', false]]]
 ];
 // Infected zone colour by type; animal species by layer.
 const INFECTED_COLORS = [[/Army|NBC/, '#d8352a'], [/Police/, '#2f6fe0'], [/Medic/, '#f2f2f2'], [/Fire/, '#ff7b1c'], [/Industrial/, '#9a7b4f'], [/./, '#8a8a8a']];
-const ANIMAL_LAYER = { mouflon: 'game', wild_boar: 'game', sheep: 'game', goat: 'game', cattle: 'game', dobermann_shepherd: 'dogs' };
+const ANIMAL_LAYER = { mouflon: 'game', wild_boar: 'game', sheep: 'game', goat: 'game', sheep_goat: 'game', cattle: 'game', pig: 'game',
+  red_deer: 'game', roe_deer: 'game', reindeer: 'game', bear: 'predators', wolf: 'predators', dobermann_shepherd: 'dogs' };
 const animalLayer = species => ANIMAL_LAYER[species] || 'critters';
+// Layers that exist only after the export mod has run (README), by the data they need.
+const NEEDS = { mainroads: 'mainroads', places: 'places', power: 'power', signs: 'signs', roadnet: 'roadnet', outlines: 'outlines', forest: 'forest', water: 'uses', fuel: 'uses' };
 const words = name => name.replace(/^Infec?t?e?d/, '').replace(/([a-z])([A-Z])/g, '$1 $2').replace(/_/g, ' ').trim();
 // Base map under everything: the in-game paper map, the satellite image, or plain white.
-const BASES = [['paper', 'Paper map'], ['satellite', 'Satellite'], ['white', 'White']];
+// Chernarus has no paper map in the game files; its "paper" tiles are drawn from the terrain at build time.
+const BASES = [['paper', data?.paper === false ? 'Topographic' : 'Paper map'], ['satellite', 'Satellite'], ['white', 'White']];
 const baseKind = () => (base === 'satellite' ? 'sat' : 'tiles');
 const COLORS = Object.fromEntries(LAYERS.flatMap(([, l]) => l.map(([id, , color]) => [id, color])));
 const S = data?.stride;
@@ -29,7 +37,54 @@ const store = { get(k) { try { return JSON.parse(localStorage.getItem(k)); } cat
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} } };
 let W = 0, H = 0, dpr = 1, view, layers, selection = null, hover = null, pending = false;
 const tiles = new Map(); // key -> Image, insertion order doubles as LRU
-let tierImage = null, labelImage = null, reliefImage = null, heightGrid = null, in3d = false, base = 'paper';
+let frame = 0; // draw counter, to tell which tiles the current frame uses
+let tierImage = null, labelImage = null, reliefImage = null, forestImage = null, heightGrid = null, in3d = false, base = 'paper';
+
+// Pre-render each square PNG into a circular badge once, shared with the 3D view.
+const ICON_FILES = { military: 'military', police: 'police', medical: 'medic', fire: 'fire',
+  heli: 'heli', convoy: 'military', policecar: 'pcar', watertruck: 'truck',
+  vehicle: 'car', car: 'car', truck: 'truck', dirtbike: 'dirtbike', well: 'well',
+  water: 'water', fuel: 'fuel', grocery: 'grocery', power: 'telephoneline' };
+const markerBadges = new Map();
+const buildingIcon = type => /(?:shop|market|grocery|store)/i.test(type.name) ? 'grocery' : type.layer;
+function badgeCanvas(image, color = '#aaa') {
+  const badge = document.createElement('canvas'); badge.width = badge.height = 96;
+  const g = badge.getContext('2d');
+  g.beginPath(); g.arc(48, 48, 46, 0, Math.PI * 2);
+  g.fillStyle = '#151515'; g.fill();
+  if (image) {
+    g.save(); g.clip();
+    // Contain and center the original square; clip only its outer corners.
+    const scale = 88 / Math.max(image.naturalWidth, image.naturalHeight);
+    const w = image.naturalWidth * scale, h = image.naturalHeight * scale;
+    g.drawImage(image, 48 - w / 2, 48 - h / 2, w, h); g.restore();
+  } else { g.fillStyle = color; g.fill(); }
+  g.strokeStyle = '#e3d9c8'; g.lineWidth = 3; g.stroke();
+  return badge;
+}
+for (const [id, file] of Object.entries(ICON_FILES)) {
+  const image = new Image();
+  image.onload = () => {
+    markerBadges.set(id, badgeCanvas(image)); redraw();
+    if (in3d) window.Map3D.layersChanged(id);
+  };
+  image.src = `icons/${file}.png`;
+}
+function marker(x, z, r, id, color = COLORS[id]) {
+  const badge = markerBadges.get(id);
+  if (!badge) { dot(x, z, r, color); return; }
+  const [sx, sy] = toScreen(x, z); if (!onScreen(sx, sy)) return;
+  const size = Math.max(18, Math.min(28, r * 3.2));
+  // Keep pictograms upright when the map rotates.
+  ctx.save(); ctx.translate(sx, sy); ctx.rotate(-view.r);
+  ctx.drawImage(badge, -size / 2, -size / 2, size, size); ctx.restore();
+}
+
+let userPins;
+function pinScreen(x, z) {
+  const [sx, sy] = toScreen(x, z), dx = sx - W / 2, dy = sy - H / 2;
+  return [W / 2 + dx * Math.cos(view.r) - dy * Math.sin(view.r), H / 2 + dx * Math.sin(view.r) + dy * Math.cos(view.r)];
+}
 
 function fitScale() { return Math.min(W, H) / data.size; }
 function clampView() {
@@ -47,16 +102,21 @@ function toWorld(sx, sy) {
   return [view.x + (fx - W / 2) / view.s, view.z - (fy - H / 2) / view.s];
 }
 function redraw() { if (!pending) { pending = true; requestAnimationFrame(draw); } }
-function saveView() { store.set('nasdara-view', view); }
+function saveView() { store.set(`${MAP_ID}-view`, view); }
 
 function tile(kind, level, tx, ty) {
   const key = `${kind}/${level}/${tx}_${ty}`;
   let img = tiles.get(key);
-  if (img) { tiles.delete(key); tiles.set(key, img); return img.complete && img.naturalWidth ? img : null; }
-  img = new Image(); img.onload = redraw; img.src = `nasdara/${key}.${kind === 'tiles' || kind === 'sat' ? 'jpg' : 'png'}`;
-  tiles.set(key, img);
-  // About two screens of 512 px tiles; older ones are dropped so deep zooming stays light on memory.
-  if (tiles.size > 64) tiles.delete(tiles.keys().next().value);
+  if (img) { tiles.delete(key); tiles.set(key, img); img.frame = frame; return img.complete && img.naturalWidth ? img : null; }
+  img = new Image(); img.onload = redraw; img.src = `${ROOT}${key}.${kind === 'tiles' || kind === 'sat' ? 'jpg' : 'png'}`;
+  img.frame = frame; tiles.set(key, img);
+  // Older tiles are dropped so deep zooming stays light on memory, but never one this frame draws: the base and
+  // three overlays can need more than the cap together, and evicting those left black holes that never filled in.
+  while (tiles.size > 96) {
+    const [oldest, old] = tiles.entries().next().value;
+    if (old.frame === frame) break;
+    tiles.delete(oldest);
+  }
   return null;
 }
 // Satellite has two extra, sharper levels (2 and 1 m/px); paper map and overlays stop at 4 m/px.
@@ -81,8 +141,17 @@ function drawLevel(level, need, kind = 'tiles') {
     }
   return complete || !need;
 }
+// A whole-map image, cropped to the part in view: stretching all of it to tens of thousands of pixels misrenders when zoomed in.
+function drawWhole(img) {
+  const corners = [toWorld(0, 0), toWorld(W, 0), toWorld(0, H), toWorld(W, H)], k = img.width / data.size;
+  const px0 = Math.max(0, Math.floor(Math.min(...corners.map(c => c[0])) * k) - 1), px1 = Math.min(img.width, Math.ceil(Math.max(...corners.map(c => c[0])) * k) + 1);
+  const py0 = Math.max(0, Math.floor((data.size - Math.max(...corners.map(c => c[1]))) * k) - 1), py1 = Math.min(img.height, Math.ceil((data.size - Math.min(...corners.map(c => c[1]))) * k) + 1);
+  if (px1 <= px0 || py1 <= py0) return;
+  const [sx, sy] = toScreen(px0 / k, data.size - py0 / k);
+  ctx.drawImage(img, px0, py0, px1 - px0, py1 - py0, sx, sy, (px1 - px0) / k * view.s, (py1 - py0) / k * view.s);
+}
 function draw() {
-  pending = false;
+  pending = false; frame++;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
   ctx.translate(W / 2, H / 2); ctx.rotate(view.r); ctx.translate(-W / 2, -H / 2);
@@ -94,16 +163,19 @@ function draw() {
     if (level > 0) drawLevel(0, false, baseKind());
     drawLevel(level, true, baseKind());
   }
-  if (layers.relief && reliefImage?.complete) { const [sx, sy] = toScreen(0, data.size); ctx.drawImage(reliefImage, sx, sy, data.size * view.s, data.size * view.s); }
+  // The relief is 16 m/px: zoomed in, one dark slope pixel would stretch over the whole screen, so it fades out from 4 m/px.
+  if (layers.relief && reliefImage?.complete && view.s < 1) {
+    ctx.globalAlpha = Math.min(1, (1 - view.s) / 0.75) * (base === 'satellite' ? 0.5 : 1); drawWhole(reliefImage); ctx.globalAlpha = 1;
+  }
+  if (layers.forest && data.forest && forestImage?.complete) drawWhole(forestImage);
   if (layers.topo) drawLevel(overlay, false, 'contours');
+  if (layers.roadnet && data.roadnet) drawLevel(overlay, false, 'roadnet');
+  if (layers.outlines && data.outlines && view.s >= 0.4) drawOutlines();
   // The bold road trace is 4 m/px; past 2 m/px it only smudges over the real road, so it fades out.
   if (layers.mainroads && view.s < 0.5) {
     ctx.globalAlpha = Math.min(1, (0.5 - view.s) / 0.25); drawLevel(overlay, false, 'roads'); ctx.globalAlpha = 1;
   }
-  if (layers.tiers && tierImage?.complete) {
-    const [sx, sy] = toScreen(0, data.size);
-    ctx.imageSmoothingEnabled = false; ctx.drawImage(tierImage, sx, sy, data.size * view.s, data.size * view.s); ctx.imageSmoothingEnabled = true;
-  }
+  if (layers.tiers && tierImage?.complete) { ctx.imageSmoothingEnabled = false; drawWhole(tierImage); ctx.imageSmoothingEnabled = true; }
   // Marker size grows gently with zoom; black outlines keep them readable on the parchment.
   const r = Math.max(3.5, Math.min(9, 3 + view.s * 5));
   if (layers.infected) for (const [x, z, radius, type] of data.infected) {
@@ -120,17 +192,20 @@ function draw() {
   ctx.globalAlpha = dim ? 0.35 : 1;
   for (let i = 0; i < b.length; i += S) {
     const layer = data.types[b[i]].layer;
-    if (layers[layer]) dot(b[i + 1], b[i + 2], r * 0.8, COLORS[layer]);
+    if (layers[layer]) marker(b[i + 1], b[i + 2], r * 0.8, buildingIcon(data.types[b[i]]), COLORS[layer]);
   }
-  for (const [layer, points] of Object.entries(data.events)) if (layers[layer]) for (const [x, z] of points) diamond(x, z, r + 1, COLORS[layer]);
+  for (const [layer, points] of Object.entries(data.events)) if (layers[layer]) for (const [x, z, name] of points) marker(x, z, r + 1, eventIcon(layer, name), COLORS[layer]);
   if (layers.spawns) for (const [x, z] of data.spawns) ring(x, z, 6, '#ffffff');
   if (layers.underground) for (const [x, z] of data.underground) hatch(x, z, r + 2);
   if (layers.power && data.power) drawPower();
   if (layers.signs && data.signs) for (const [x, z] of data.signs) dot(x, z, Math.max(2.5, r * 0.6), '#f2f2f2');
+  for (const kind of ['water', 'fuel']) if (layers[kind] && data.uses) for (const [x, z, name] of data.uses[kind]) marker(x, z, r, sourceIcon(kind, name), COLORS[kind]);
   ctx.globalAlpha = 1;
-  if (selection) for (const i of selection.buildings) { ring(b[i * S + 1], b[i * S + 2], r + 3, '#ffcf3f'); dot(b[i * S + 1], b[i * S + 2], r * 0.8, '#ffcf3f'); }
+  if (selection?.kind === 'place') ring(selection.x, selection.z, r + 8, '#ffcf3f');
+  if (selection) for (const i of selection.buildings) { ring(b[i * S + 1], b[i * S + 2], r + 3, '#ffcf3f'); marker(b[i * S + 1], b[i * S + 2], r * 0.8, buildingIcon(data.types[b[i * S]]), '#ffcf3f'); }
   if (hover) ring(hover.x, hover.z, r + 5, '#fff');
   drawLabels();
+  if (!in3d) userPins?.render(pinScreen, toWorld);
 }
 // Place names lifted off the paper map, drawn upright at their map position whatever the rotation.
 function drawLabels() {
@@ -139,33 +214,95 @@ function drawLabels() {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   // Black names need a light halo to read on the dark satellite image.
   if (base === 'satellite') { ctx.shadowColor = '#fff'; ctx.shadowBlur = 4; }
-  for (const [x, z, ax, ay, w, h] of data.labels) {
-    if (h * k < 3) continue;
+  const game = layers.places && data.places;
+  for (const [i, [x, z, ax, ay, w, h]] of data.labels.entries()) {
+    if (h * k < 3 || (game && paperNames.has(i))) continue;
     const [fx, fy] = toScreen(x, z), dx = fx - W / 2, dy = fy - H / 2;
     const sx = W / 2 + dx * c - dy * s, sy = H / 2 + dx * s + dy * c;
     if (sx < -w * k || sy < -h * k || sx > W + w * k || sy > H + h * k) continue;
     ctx.drawImage(labelImage, ax, ay, w, h, sx - w * k / 2, sy - h * k / 2, w * k, h * k);
   }
   ctx.shadowBlur = 0;
+  if (game) drawPlaces(c, s);
+}
+// Game place names (export mod), upright, largest first; smaller kinds appear as you zoom in.
+const PLACE_STYLE = [[/Capital/, 'bold 18px', 0], [/City/, 'bold 15px', 0], [/Village/, '600 13px', 0.05], [/Marine/, 'italic 12px', 0.08], [/./, 'italic 11px', 0.12]];
+// Paper-map name labels (wider than a grid number) near a game place: hidden while game names are shown.
+let paperNames = new Set();
+function drawPlaces(c, s) {
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.lineJoin = 'round';
+  const dark = base === 'satellite';
+  for (const [x, z, name, type] of data.places) {
+    const [font, minScale] = PLACE_STYLE.find(([re]) => re.test(type)).slice(1);
+    if (view.s < minScale) continue;
+    const [fx, fy] = toScreen(x, z), dx = fx - W / 2, dy = fy - H / 2;
+    const sx = W / 2 + dx * c - dy * s, sy = H / 2 + dx * s + dy * c;
+    if (sx < -200 || sy < -40 || sx > W + 200 || sy > H + 40) continue;
+    ctx.font = `${font} 'Segoe UI', sans-serif`;
+    ctx.strokeStyle = dark ? '#000c' : '#f4ead2e0'; ctx.lineWidth = 4; ctx.strokeText(name, sx, sy);
+    ctx.fillStyle = /Marine/.test(type) ? (dark ? '#9fd4ff' : '#1d4e8a') : dark ? '#fff' : '#1d140b';
+    ctx.fillText(name, sx, sy);
+  }
 }
 // Map-frame points within the rotated viewport's bounding circle.
 function onScreen(sx, sy) { const d = Math.hypot(W, H) / 2 + 20; return Math.abs(sx - W / 2) < d && Math.abs(sy - H / 2) < d; }
-// Powerlines from the export mod: dark-cased yellow lines (HV wider), poles as dots when zoomed in.
+// Black screen-sized dashes stay readable even when pole segments are very short.
 function drawPower() {
-  for (const [width, color] of [[4.5, '#000'], [2.2, '#ffd84a']]) {
-    ctx.strokeStyle = color; ctx.lineCap = 'round';
-    for (const family of ['pole', 'hv']) {
-      ctx.lineWidth = family === 'hv' ? width + 1 : width - 1; ctx.beginPath();
-      for (const [x1, z1, x2, z2, f] of data.power.segments) {
-        if (f !== family) continue;
-        const [ax, ay] = toScreen(x1, z1), [bx, by] = toScreen(x2, z2);
-        if (!onScreen(ax, ay) && !onScreen(bx, by)) continue;
-        ctx.moveTo(ax, ay); ctx.lineTo(bx, by);
-      }
-      ctx.stroke();
+  ctx.strokeStyle = '#000'; ctx.lineCap = 'butt';
+  for (const family of ['pole', 'hv']) {
+    const hv = family === 'hv';
+    ctx.lineWidth = hv ? 2 : 1.4; ctx.setLineDash(hv ? [6, 4] : [4, 4]);
+    let distance = 0;
+    for (const [x1, z1, x2, z2, f] of data.power.segments) {
+      if (f !== family) continue;
+      const [ax, ay] = toScreen(x1, z1), [bx, by] = toScreen(x2, z2);
+      const offset = distance; distance += Math.hypot(bx - ax, by - ay);
+      if (!onScreen(ax, ay) && !onScreen(bx, by)) continue;
+      ctx.lineDashOffset = -offset;
+      ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
     }
   }
-  if (view.s > 0.5) for (const [x, z] of data.power.poles) dot(x, z, 2, '#ffd84a');
+  ctx.setLineDash([]); ctx.lineDashOffset = 0;
+}
+// Building and structure outlines from the export, at true size and rotation, once zoomed in enough to read.
+// There are tens of thousands, so they are built once into world-space paths per 512 m cell and only visible cells are drawn.
+const OUTLINE_CELL = 512;
+let outlineCells = null;
+function buildOutlineCells() {
+  const o = data.outlines, n = Math.ceil(data.size / OUTLINE_CELL);
+  outlineCells = { n, paths: Array.from({ length: n * n }, () => new Path2D()) };
+  for (let i = 0; i < o.length; i += 5) {
+    const x = o[i], z = o[i + 1], hw = o[i + 2], hd = o[i + 3], c = Math.cos(o[i + 4]), s = Math.sin(o[i + 4]);
+    const cx = Math.min(n - 1, Math.max(0, Math.floor(x / OUTLINE_CELL))), cz = Math.min(n - 1, Math.max(0, Math.floor(z / OUTLINE_CELL)));
+    const p = outlineCells.paths[cz * n + cx];
+    // Model x runs along (cos, -sin) and model z along (sin, cos) in world x, z.
+    p.moveTo(x - hw * c - hd * s, z + hw * s - hd * c);
+    p.lineTo(x + hw * c - hd * s, z - hw * s - hd * c);
+    p.lineTo(x + hw * c + hd * s, z - hw * s + hd * c);
+    p.lineTo(x - hw * c + hd * s, z + hw * s + hd * c);
+    p.closePath();
+  }
+}
+function drawOutlines() {
+  if (!outlineCells) buildOutlineCells();
+  const { n, paths } = outlineCells;
+  const corners = [toWorld(0, 0), toWorld(W, 0), toWorld(0, H), toWorld(W, H)];
+  // Cells hold outlines by centre, so pad by one cell for buildings that straddle an edge.
+  const x0 = Math.max(0, Math.floor(Math.min(...corners.map(c => c[0])) / OUTLINE_CELL) - 1), x1 = Math.min(n - 1, Math.floor(Math.max(...corners.map(c => c[0])) / OUTLINE_CELL) + 1);
+  const z0 = Math.max(0, Math.floor(Math.min(...corners.map(c => c[1])) / OUTLINE_CELL) - 1), z1 = Math.min(n - 1, Math.floor(Math.max(...corners.map(c => c[1])) / OUTLINE_CELL) + 1);
+  ctx.save();
+  // World x, z straight onto the (already rotated) map frame; screen y points south.
+  ctx.translate(W / 2 - view.x * view.s, H / 2 + view.z * view.s); ctx.scale(view.s, -view.s);
+  ctx.fillStyle = base === 'satellite' ? '#ffffff30' : '#5a463240';
+  ctx.strokeStyle = base === 'satellite' ? '#ffffffb0' : '#2b2b2b'; ctx.lineWidth = Math.min(1.5, 0.5 + view.s) / view.s;
+  for (let cz = z0; cz <= z1; cz++) for (let cx = x0; cx <= x1; cx++) { const p = paths[cz * n + cx]; ctx.fill(p); ctx.stroke(p); }
+  ctx.restore();
+}
+// Water source / fuel pump: a coloured drop with a dark edge.
+function drop(x, z, r, color) {
+  const [sx, sy] = toScreen(x, z); if (!onScreen(sx, sy)) return;
+  ctx.beginPath(); ctx.moveTo(sx, sy - r * 1.4); ctx.quadraticCurveTo(sx + r, sy, sx, sy + r * 0.9); ctx.quadraticCurveTo(sx - r, sy, sx, sy - r * 1.4);
+  ctx.fillStyle = color; ctx.fill(); ctx.strokeStyle = '#000'; ctx.lineWidth = 1.5; ctx.stroke();
 }
 // Territory circle at true size (at least a few pixels), translucent with a solid edge.
 function area(x, z, radius, color, alpha) {
@@ -184,8 +321,9 @@ function hatch(x, z, r) {
 }
 function dot(x, z, r, color) {
   const [sx, sy] = toScreen(x, z); if (!onScreen(sx, sy)) return;
-  ctx.fillStyle = color; ctx.fillRect(sx - r, sy - r, r * 2, r * 2);
-  ctx.strokeStyle = '#000'; ctx.lineWidth = 1.25; ctx.strokeRect(sx - r, sy - r, r * 2, r * 2);
+  ctx.beginPath(); ctx.arc(sx, sy, r, 0, Math.PI * 2);
+  ctx.fillStyle = color; ctx.fill();
+  ctx.strokeStyle = '#000'; ctx.lineWidth = 1.25; ctx.stroke();
 }
 function diamond(x, z, r, color) {
   const [sx, sy] = toScreen(x, z); if (!onScreen(sx, sy)) return;
@@ -199,11 +337,11 @@ function ring(x, z, r, color) {
 }
 
 // Nearest visible marker under the cursor, for the tooltip.
-function pick(mx, my) {
-  const [sx, sy] = unrotate(mx, my);
-  let best = null, bestD = 10 * 10;
+function pick(mx, my, project = toScreen, rotated = true) {
+  const [sx, sy] = rotated ? unrotate(mx, my) : [mx, my];
+  let best = null, bestD = 14 * 14;
   const consider = (x, z, label, sub) => {
-    const [px, py] = toScreen(x, z), d = (px - sx) ** 2 + (py - sy) ** 2;
+    const [px, py] = project(x, z), d = (px - sx) ** 2 + (py - sy) ** 2;
     if (d < bestD) { bestD = d; best = { x, z, label, sub }; }
   };
   const b = data.buildings, picked = selection ? new Set(selection.buildings) : null;
@@ -216,6 +354,8 @@ function pick(mx, my) {
   if (layers.zones) for (const zone of data.zones) consider(zone.x, zone.z, `Toxic zone ${zone.name}`, `radius ${zone.r} m`);
   if (layers.underground) for (const [x, z, name] of data.underground) consider(x, z, words(name), 'Underground entrance');
   if (layers.signs && data.signs) for (const [x, z, name] of data.signs) consider(x, z, words(name), 'Sign');
+  for (const [kind, sub] of [['water', 'Drinking water'], ['fuel', 'Fuel']]) if (layers[kind] && data.uses)
+    for (const [x, z, name] of data.uses[kind]) consider(x, z, words(name), sub);
   if (layers.infected) for (const [x, z, radius, type] of data.infected) consider(x, z, `Infected: ${words(data.zoneTypes[type]) || 'zone'}`, `radius ${radius} m`);
   for (const [x, z, radius, species, kind] of data.animals) if (layers[animalLayer(species)])
     consider(x, z, words(species).replace(/^w/, c => c.toUpperCase()), `${words(kind).replace(/^Zones*/, '') || 'Territory'} · radius ${radius} m`);
@@ -225,12 +365,24 @@ function tierText(t) { const s = [1, 2, 4, 8].filter(v => t & v).map(v => `T${Ma
 
 function select(hit) {
   if (!hit) { selection = null; $('selection').hidden = true; redraw(); if (in3d) window.Map3D.selectionChanged(); return; }
+  // A place: centre on it (zoomed in to show at least about 4 km across) and ring it.
+  if (hit.kind === 'place') {
+    const [x, z, name, type] = data.places[hit.index];
+    selection = { ...hit, x, z, buildings: [] };
+    $('selectionText').textContent = `${name} · ${placeType(type)}`;
+    $('selection').hidden = false; $('results').hidden = true; $('query').blur();
+    if (in3d) window.Map3D.focus(x, z);
+    else { view.x = x; view.z = z; view.s = Math.max(view.s, Math.min(W, H) / 4000); clampView(); saveView(); }
+    redraw(); if (in3d) window.Map3D.selectionChanged(); return;
+  }
   const buildings = hit.kind === 'item' ? lootBuildings(data, data.items[hit.index]) : typeBuildings(data, hit.index);
   selection = { ...hit, buildings };
   $('selectionText').textContent = `${hit.label}: ${buildings.length} building${buildings.length === 1 ? '' : 's'}`;
   $('selection').hidden = false; $('results').hidden = true; $('query').blur();
   redraw(); if (in3d) window.Map3D.selectionChanged();
 }
+// "NameCityCapital" -> "city capital", "NameMarine" -> "marine", "Hill" -> "hill".
+const placeType = type => (type.replace(/^Name/, '').replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase() || 'place');
 let results = [], active = 0;
 function showResults() {
   results = search(data, $('query').value); active = 0;
@@ -238,7 +390,8 @@ function showResults() {
   for (const [i, hit] of results.entries()) {
     const li = document.createElement('li'); li.className = i === active ? 'active' : '';
     const name = document.createElement('span'); name.textContent = hit.label;
-    const kind = document.createElement('small'); kind.textContent = hit.kind === 'item' ? data.items[hit.index].category || 'loot' : 'building';
+    const kind = document.createElement('small');
+    kind.textContent = hit.kind === 'item' ? data.items[hit.index].category || 'loot' : hit.kind === 'place' ? placeType(data.places[hit.index][3]) : 'building';
     li.append(name, kind); li.addEventListener('mousedown', e => { e.preventDefault(); select(hit); });
     list.append(li);
   }
@@ -251,25 +404,29 @@ function buildLayerList() {
   for (const [id, label] of BASES) {
     const row = document.createElement('label'), radio = document.createElement('input');
     radio.type = 'radio'; radio.name = 'base'; radio.checked = base === id;
-    radio.addEventListener('change', () => { base = id; store.set('nasdara-base', base); redraw(); if (in3d) window.Map3D.layersChanged('base'); });
+    radio.addEventListener('change', () => { base = id; store.set(`${MAP_ID}-base`, base); redraw(); if (in3d) window.Map3D.layersChanged('base'); });
     row.append(radio, label); list.append(row);
   }
   for (const [group, items] of LAYERS) {
     const h = document.createElement('h3'); h.textContent = group.toUpperCase(); list.append(h);
     for (const [id, label, color] of items) {
-      if ((id === 'power' && !data.power) || (id === 'signs' && !data.signs)) continue; // only after an object export
+      if (NEEDS[id] && !data[NEEDS[id]]) continue; // only after the export mod has run
       const row = document.createElement('label'), box = document.createElement('input'), swatch = document.createElement('i');
-      box.type = 'checkbox'; box.checked = !!layers[id]; swatch.style.background = color;
-      box.addEventListener('change', () => { layers[id] = box.checked; store.set('nasdara-layers', layers); redraw(); if (in3d) window.Map3D.layersChanged(id); });
+      box.type = 'checkbox'; box.checked = !!layers[id];
+      if (ICON_FILES[id]) {
+        const image = document.createElement('img'); image.src = `icons/${ICON_FILES[id === 'water' ? 'well' : id]}.png`; image.alt = '';
+        swatch.className = 'icon-badge'; swatch.append(image);
+      } else swatch.style.background = color;
+      box.addEventListener('change', () => { layers[id] = box.checked; store.set(`${MAP_ID}-layers`, layers); redraw(); if (in3d) window.Map3D.layersChanged(id); });
       row.append(box, swatch, label); list.append(row);
     }
   }
   const setOpen = open => {
     $('layers').classList.toggle('closed', !open); $('layersToggle').setAttribute('aria-expanded', String(open));
   };
-  setOpen(store.get('nasdara-layers-open') === true);
+  setOpen(store.get(`${MAP_ID}-layers-open`) === true);
   $('layersToggle').addEventListener('click', () => {
-    const open = $('layers').classList.contains('closed'); setOpen(open); store.set('nasdara-layers-open', open);
+    const open = $('layers').classList.contains('closed'); setOpen(open); store.set(`${MAP_ID}-layers-open`, open);
   });
 }
 function resize() {
@@ -291,7 +448,7 @@ function loadHeights() {
     for (let p = 0; p < h.length; p++) h[p] = (px[p * 4] * 256 + px[p * 4 + 1]) / 10;
     heightGrid = { n: img.width, h };
   };
-  img.src = 'nasdara/heights.png';
+  img.src = data.terrain?.fine ? `${ROOT}heights-fine.png` : `${ROOT}heights.png`;
 }
 // The 3D view and three.js load on first use only.
 function script(src) {
@@ -300,10 +457,11 @@ function script(src) {
   });
 }
 async function toggle3d() {
+  userPins?.cancel();
   const button = $('toggle3d');
   if (in3d) {
     const at = window.Map3D.close(); in3d = false;
-    view.x = at.x; view.z = at.z; clampView(); setRotation(at.r);
+    view.x = at.x; view.z = at.z; if (at.s) view.s = at.s; clampView(); setRotation(at.r);
   } else {
     button.disabled = true;
     try {
@@ -337,16 +495,35 @@ function zoomAt(sx, sy, factor) {
 }
 
 $('close').addEventListener('click', () => window.desk ? window.desk.close() : window.close());
+// Full screen (also F11): the desk window itself in the app, the page in a plain browser.
+function toggleFullscreen() {
+  if (window.desk) window.desk.fullscreen();
+  else if (document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen().catch(() => {});
+}
+$('fullscreen').addEventListener('click', toggleFullscreen);
+addEventListener('keydown', e => { if (e.key === 'F11') { e.preventDefault(); toggleFullscreen(); } });
 if (!data) $('missing').hidden = false;
 else {
-  view = { x: data.size / 2, z: data.size / 2, s: 0, r: 0, ...store.get('nasdara-view') };
-  base = BASES.some(([id]) => id === store.get('nasdara-base')) ? store.get('nasdara-base') : 'paper';
-  layers = store.get('nasdara-layers') || Object.fromEntries(LAYERS.flatMap(([, l]) => l.map(([id, , , on]) => [id, on])));
-  tierImage = new Image(); tierImage.onload = redraw; tierImage.src = 'nasdara/tiers.png';
-  labelImage = new Image(); labelImage.onload = redraw; labelImage.src = 'nasdara/labels.png';
-  reliefImage = new Image(); reliefImage.onload = redraw; reliefImage.src = 'nasdara/relief.png';
+  document.title = `${data.name} · Offline map`;
+  view = { x: data.size / 2, z: data.size / 2, s: 0, r: 0, ...store.get(`${MAP_ID}-view`) };
+  base = BASES.some(([id]) => id === store.get(`${MAP_ID}-base`)) ? store.get(`${MAP_ID}-base`) : 'paper';
+  // Saved choices over the defaults, so layers added since (e.g. after an export) start at their default.
+  layers = { ...Object.fromEntries(LAYERS.flatMap(([, l]) => l.map(([id, , , on]) => [id, on]))), ...store.get(`${MAP_ID}-layers`) };
+  // A paper map kept as printed (Sakhal) already shows its names: game place names start hidden there.
+  if (data.paper && !data.labels.length && !('places' in (store.get(`${MAP_ID}-layers`) || {}))) layers.places = false;
+  if (data.places && data.labels) data.labels.forEach(([x, z, , , w], i) => {
+    if (w >= 30 && data.places.some(([px, pz]) => Math.hypot(px - x, pz - z) < 900)) paperNames.add(i);
+  });
+  tierImage = new Image(); tierImage.onload = redraw; tierImage.src = `${ROOT}tiers.png`;
+  labelImage = new Image(); labelImage.onload = redraw; labelImage.src = `${ROOT}labels.png`;
+  reliefImage = new Image(); reliefImage.onload = redraw; reliefImage.src = `${ROOT}relief.png`;
+  if (data.forest) { forestImage = new Image(); forestImage.onload = redraw; forestImage.src = `${ROOT}forest.png`; }
   loadHeights();
   $('toggle3d').addEventListener('click', toggle3d);
+  userPins = window.MapPins.mount({ size: data.size, saved: store.get(`${MAP_ID}-pins`),
+    persist: points => store.set(`${MAP_ID}-pins`, points),
+    onChange: () => { redraw(); if (in3d) window.Map3D.pinsChanged(); } });
+  userPins.bindMap(canvas, toWorld);
   buildLayerList(); resize(); setRotation(view.r);
   if (!view.s) { view.s = fitScale(); redraw(); }
   window.desk?.onCommand(command);
@@ -376,7 +553,6 @@ else {
   });
   canvas.addEventListener('pointerleave', () => { $('tooltip').hidden = true; if (hover) { hover = null; redraw(); } });
   canvas.addEventListener('wheel', e => { e.preventDefault(); zoomAt(e.clientX, e.clientY, e.deltaY < 0 ? 1.25 : 0.8); }, { passive: false });
-  canvas.addEventListener('dblclick', e => zoomAt(e.clientX, e.clientY, e.shiftKey ? 0.5 : 2));
   $('query').addEventListener('input', showResults);
   $('query').addEventListener('focus', showResults);
   $('query').addEventListener('blur', () => { $('results').hidden = true; });

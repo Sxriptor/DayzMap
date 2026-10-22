@@ -1,5 +1,5 @@
-// Turns the export mod's object list (one JSON object per line) into map layers: powerlines joined up from
-// their poles/towers, and sign positions.
+// Turns the export mod's object list (one JSON object per line) into map layers: powerlines (from the wire
+// objects where the map has them, else joined up from poles/towers) and sign positions.
 const FAMILIES = [
   // [family, model test, longest span between neighbours in metres]
   ['hv', /hv3?_tower|vhv_tower|power_hv_line|hv_tower/, 450],
@@ -11,17 +11,40 @@ function parseExport(text) {
     if (!line.trim()) continue;
     try {
       const o = JSON.parse(line);
-      if (typeof o.m === 'string' && [o.x, o.z].every(Number.isFinite)) out.push(o);
+      // '#animator' and other engine helpers are not map objects.
+      if (typeof o.m === 'string' && !o.m.startsWith('#') && [o.x, o.z].every(Number.isFinite)) out.push(o);
     } catch {}
   }
   return out;
 }
 const familyOf = model => (FAMILIES.find(([, test]) => test.test(model)) || [])[0];
-// Links each family's nodes shortest-first, at most two links per node and no loops, so lines come out as chains.
+// Some maps (Nasdara) place the wires themselves as objects: one straight span along the model's z axis.
+// Only local lines: high-voltage wire pieces leave gaps at the towers, which are mapped and joined instead.
+const WIRES = [['pole', /power_wire(tel)?_\d/]];
+const wireFamily = model => (WIRES.find(([, test]) => test.test(model)) || [])[0];
+// Wire spans as segments, from the position, yaw and model box (export mod files with "b"). The parallel
+// conductors of one span collapse into a single segment.
+function wireSegments(objects) {
+  const out = [], seen = new Set();
+  for (const o of objects) {
+    const family = wireFamily(o.m);
+    if (!family || !Array.isArray(o.b)) continue;
+    const yaw = (o.yaw || 0) * Math.PI / 180, half = (o.b[5] - o.b[2]) / 2, mid = (o.b[5] + o.b[2]) / 2;
+    const dx = Math.sin(yaw), dz = Math.cos(yaw), cx = o.x + dx * mid, cz = o.z + dz * mid;
+    const key = `${family}${Math.round(cx / 4)},${Math.round(cz / 4)},${Math.round(((o.yaw % 180) + 180) % 180 / 10)}`;
+    if (half < 2 || seen.has(key)) continue;
+    seen.add(key);
+    out.push([round(cx - dx * half), round(cz - dz * half), round(cx + dx * half), round(cz + dz * half), family]);
+  }
+  return out;
+}
+// Wires where the map has them; otherwise each family's nodes linked shortest-first, at most two links per
+// node and no loops, so lines come out as chains.
 function powerlines(objects) {
-  const segments = [], poles = [];
+  const segments = wireSegments(objects), poles = [], wired = new Set(segments.map(s => s[4]));
   for (const [family, , span] of FAMILIES) {
     const nodes = objects.filter(o => familyOf(o.m) === family);
+    if (wired.has(family)) { for (const o of nodes) poles.push([round(o.x), round(o.z), family]); continue; }
     for (const o of nodes) poles.push([round(o.x), round(o.z), family]);
     const cell = span, grid = new Map(), key = (gx, gz) => gx * 100000 + gz;
     nodes.forEach((o, i) => { const k = key(Math.floor(o.x / cell), Math.floor(o.z / cell)); (grid.get(k) || grid.set(k, []).get(k)).push(i); });

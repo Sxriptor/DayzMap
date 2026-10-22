@@ -80,6 +80,9 @@ if (locked) app.whenReady().then(async () => {
   win.on('close', () => { settings.bounds = win.getNormalBounds(); save(); });
   win.on('closed', () => app.quit());
   ipcMain.on('close', event => { if (event.sender === wc) win.close(); });
+  ipcMain.on('fullscreen', event => { if (event.sender === wc) win.setFullScreen(!win.isFullScreen()); });
+  // Switching maps: the page saves its choice, then the window reloads from here (page navigation is blocked).
+  ipcMain.on('reload', event => { if (event.sender === wc) wc.reload(); });
   const icon = nativeImage.createFromDataURL('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAIElEQVQ4T2Nct2LdfwY8gImBQjBqABg1AIwaAEYNAAMDAJ7wAzM2y6ItAAAAAElFTkSuQmCC');
   tray = new Tray(icon);
   tray.setToolTip('DayZ Map Desk');

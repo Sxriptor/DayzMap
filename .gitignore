@@ -3,5 +3,8 @@ dist/
 .runtime/
 *.log
 src/map/nasdara/
+src/map/chernarusplus/
+src/map/sakhal/
+src/map/maps.js
 @NasdaraExport/
 exports/
