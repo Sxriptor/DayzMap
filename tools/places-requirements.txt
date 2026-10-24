@@ -1,0 +1,11 @@
+# Python packages for tools/places.py (npm run places:setup installs them into .runtime/py).
+# torch/torchvision come from PyTorch's CUDA 12.8 index (see places:setup); without an NVIDIA card they run on the CPU.
+torch
+torchvision
+numpy
+pillow
+onnx
+onnxscript
+onnxruntime
+huggingface_hub
+safetensors

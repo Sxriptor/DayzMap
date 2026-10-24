@@ -13,7 +13,7 @@ test('window bounds are kept only when valid', () => {
 });
 test('numpad layout matches the requested controls', () => {
   const keys = Object.fromEntries(Object.entries(SHORTCUTS).map(([id, [, key]]) => [id, key]));
-  assert.deepEqual(keys, { toggle: 'Control+Alt+M', clickThrough: 'Control+Alt+T', up: 'num8', left: 'num4', right: 'num6', down: 'num2',
+  assert.deepEqual(keys, { toggle: 'Control+Alt+M', clickThrough: 'Control+Alt+T', locate: 'Control+Alt+L', locateMore: 'Control+Alt+Shift+L', up: 'num8', left: 'num4', right: 'num6', down: 'num2',
     rotateLeft: 'num1', rotateRight: 'num3', zoomIn: 'num9', zoomOut: 'num7' });
   assert.ok(MAP_COMMANDS.every(id => SHORTCUTS[id]));
   assert.equal(new Set(Object.values(keys)).size, Object.keys(keys).length);

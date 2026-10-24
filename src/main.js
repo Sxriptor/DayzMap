@@ -1,13 +1,16 @@
-const { app, BrowserWindow, ipcMain, globalShortcut, Menu, Tray, nativeImage, screen } = require('electron');
+const { app, BrowserWindow, ipcMain, globalShortcut, Menu, Tray, nativeImage, screen, shell } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const { SHORTCUTS, MAP_COMMANDS, sanitize } = require('./config');
 const MAP_PAGE = path.join(__dirname, 'map', 'index.html');
+const ICON = path.join(__dirname, 'icon.png');
 let win, tray, settings, settingsPath;
 let clickThrough = false, loaded = false;
+let currentMap = 'nasdara'; // the map the page shows, for the Where am I shortcut
 const smoke = process.argv.includes('--smoke');
 if (smoke) {
-  const smokeData = path.join(__dirname, '..', '.runtime', 'smoke-profile');
+  // A packaged app's folder is a read-only archive, so its smoke profile goes in the temp folder.
+  const smokeData = app.isPackaged ? path.join(app.getPath('temp'), 'mapino-smoke-profile') : path.join(__dirname, '..', '.runtime', 'smoke-profile');
   fs.mkdirSync(smokeData, { recursive: true });
   app.setPath('userData', smokeData);
 }
@@ -47,6 +50,20 @@ function register(id, handler) {
   console.warn(`Shortcut unavailable: ${SHORTCUTS[id][0]} (${SHORTCUTS[id][1]})`);
   return false;
 }
+// Where am I from the shortcut: the game is captured before Mapino shows (it must not cover the picture),
+// then the answer, or why there is none, goes to the page.
+let locating = false;
+async function locateFromShortcut(add) {
+  if (locating) return;
+  locating = true;
+  let result;
+  try { result = await require('./locator').locateRequest({ map: currentMap, add }); }
+  catch (error) { result = { error: error.message }; }
+  locating = false;
+  show();
+  const send = () => win.webContents.send('located', result);
+  if (win.webContents.isLoading()) win.webContents.once('did-finish-load', () => setTimeout(send, 500)); else send();
+}
 function bindMapKeys(on) {
   for (const id of MAP_COMMANDS) {
     const key = SHORTCUTS[id][1];
@@ -62,7 +79,7 @@ if (locked) app.whenReady().then(async () => {
   Menu.setApplicationMenu(null);
   const bounds = settings.bounds && onScreen(settings.bounds) ? settings.bounds : { width: 1080, height: 780 };
   win = new BrowserWindow({ ...bounds, minWidth: 300, minHeight: 200, frame: false,
-    title: 'DayZ Map Desk', backgroundColor: '#000000', alwaysOnTop: settings.alwaysOnTop,
+    title: 'Mapino', icon: ICON, backgroundColor: '#000000', alwaysOnTop: settings.alwaysOnTop,
     webPreferences: { preload: path.join(__dirname, 'preload.js'), sandbox: true, contextIsolation: true, nodeIntegration: false }
   });
   win.setOpacity(settings.opacity);
@@ -83,9 +100,30 @@ if (locked) app.whenReady().then(async () => {
   ipcMain.on('fullscreen', event => { if (event.sender === wc) win.setFullScreen(!win.isFullScreen()); });
   // Switching maps: the page saves its choice, then the window reloads from here (page navigation is blocked).
   ipcMain.on('reload', event => { if (event.sender === wc) wc.reload(); });
-  const icon = nativeImage.createFromDataURL('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAIElEQVQ4T2Nct2LdfwY8gImBQjBqABg1AIwaAEYNAAMDAJ7wAzM2y6ItAAAAAElFTkSuQmCC');
+  ipcMain.on('minimize', event => { if (event.sender === wc) win.minimize(); });
+  ipcMain.handle('places', (event, map) => {
+    if (event.sender !== wc) return false;
+    if (typeof map === 'string') currentMap = map;
+    return require('./locator').available(map);
+  });
+  ipcMain.handle('locate', async (event, request) => {
+    if (event.sender !== wc) throw new Error('not allowed');
+    try { return await require('./locator').locateRequest(request); }
+    catch (error) { return { error: error.message }; }
+  });
+  // Server panel (src/server.js): set up, start and stop a DayZ server from a form. Results come back as
+  // { ok } or { error } so the panel can show the message.
+  const SERVER_ACTIONS = ['scan', 'save', 'start', 'stop', 'join', 'running', 'open'];
+  ipcMain.handle('server', async (event, action, payload) => {
+    if (event.sender !== wc || !SERVER_ACTIONS.includes(action)) return { error: 'not allowed' };
+    const server = require('./server');
+    server.init(path.join(app.getPath('userData'), 'servers.json'));
+    try { return { ok: action === 'open' ? await shell.openPath(server.folder()) : await server[action](payload) }; }
+    catch (error) { return { error: error.message }; }
+  });
+  const icon = nativeImage.createFromPath(ICON).resize({ width: 16, height: 16, quality: 'best' });
   tray = new Tray(icon);
-  tray.setToolTip('DayZ Map Desk');
+  tray.setToolTip('Mapino');
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: 'Open map', click: () => { if (clickThrough) toggleClickThrough(); show(true); } },
     { label: 'Hide map', click: hide },
@@ -95,6 +133,8 @@ if (locked) app.whenReady().then(async () => {
   tray.on('double-click', () => { if (clickThrough) toggleClickThrough(); show(true); });
   register('toggle', () => win.isVisible() && !win.isMinimized() ? hide() : show());
   register('clickThrough', toggleClickThrough);
+  register('locate', () => locateFromShortcut(false));
+  register('locateMore', () => locateFromShortcut(true));
   await loadMap();
   bindMapKeys(true);
   if (smoke) {

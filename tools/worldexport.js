@@ -27,10 +27,13 @@ const latin = s => s.replace(/[Ѐ-ӿ]/g, ch => {
 // "Name_Village_Foo" style class names when a place has no plain name (or a stringtable key).
 const placeName = p => latin(p.name && !/^[$#@]/.test(p.name) ? p.name : p.cls.replace(/^(Name\w*?_|Settlement_|Local_)/i, '').replace(/_/g, ' '));
 // Each place: x, z, name, type ("NameCity", "NameVillage", "NameLocal", "Hill", "NameMarine", ...).
+// Chernarus's config also holds unnamed camera viewpoints and Central Economy office anchors: not places.
+const NOT_PLACES = /^(ViewPoint|LocalOffice)/;
 function parseWorld(text) {
   const world = JSON.parse(text);
   return { world: world.world, size: world.size,
-    places: world.places.filter(p => Number.isFinite(p.x) && Number.isFinite(p.z)).map(p => [round(p.x), round(p.z), placeName(p), p.type || '']) };
+    places: world.places.filter(p => Number.isFinite(p.x) && Number.isFinite(p.z) && !NOT_PLACES.test(p.type || ''))
+      .map(p => [round(p.x), round(p.z), p.type === 'RailroadStation' && !p.name ? `${p.cls.replace(/^RailroadStation_/, '')} station` : placeName(p), p.type || '']) };
 }
 // "index<TAB>name" lines -> names by index.
 function parseTable(text) {
@@ -80,12 +83,24 @@ function footprint(o) {
   return [round(o.x + lx * c + lz * s), round(o.z - lx * s + lz * c), round((x1 - x0) / 2), round((z1 - z0) / 2), Math.round(yaw * 1000) / 1000];
 }
 // Outlines worth drawing: buildings and other standing structures (walls, sheds, towers) of a few square metres.
-function outlines(objects) {
+function structures(objects) {
   const out = [];
   for (const o of objects) {
     if (o.k === 'r' || isRoadModel(o.m) || isNatureModel(o.m) || !Array.isArray(o.b)) continue;
     const f = footprint(o), tall = o.b[4] - o.b[1];
-    if (f && (o.k === 'b' || (f[2] * f[3] * 4 >= 9 && tall >= 1.5)) && f[2] < 200 && f[3] < 200) out.push(f);
+    if (f && (o.k === 'b' || (f[2] * f[3] * 4 >= 9 && tall >= 1.5)) && f[2] < 200 && f[3] < 200) out.push([o, f]);
+  }
+  return out;
+}
+const outlines = objects => structures(objects).map(([, f]) => f);
+// 3D blocks for the same structures: footprint, roof height above sea level (the object's own height plus its
+// model box top, so harbour walls whose boxes reach the sea bed stay at deck level) and a category index from
+// categoryOf(object): [x, z, half width, half depth, yaw, roof, category] per block, flattened.
+function blocks(objects, categoryOf) {
+  const out = [];
+  for (const [o, f] of structures(objects)) {
+    const roof = Number.isFinite(o.y) ? o.y + o.b[4] : o.b[4] - o.b[1];
+    out.push(...f, round(roof), categoryOf(o));
   }
   return out;
 }
@@ -159,4 +174,4 @@ function usePoints(objects) {
   for (const o of objects) if (out[o.u]) out[o.u].push([round(o.x), round(o.z), (o.t || o.m.split('/').pop().replace(/\.p3d$/, '')).replace(/^Land_/, '')]);
   return out;
 }
-module.exports = { latin, exportFiles, parseWorld, parseTable, parseTerrain, resampleHeights, footprint, outlines, paintRects, roadClass, roadPartClass, roadRaster, vegetationDensity, usePoints };
+module.exports = { latin, exportFiles, parseWorld, parseTable, parseTerrain, resampleHeights, footprint, outlines, blocks, paintRects, roadClass, roadPartClass, roadRaster, vegetationDensity, usePoints };

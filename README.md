@@ -1,4 +1,4 @@
-# DayZ Map Desk
+# Mapino
 
 A small Windows Electron companion with offline DayZ maps (Chernarus, Frostline/Sakhal and Nasdara) built from your own DayZ install. Unofficial; map and game data remain © Bohemia Interactive. No internet, game integration or automatic player tracking.
 
@@ -11,7 +11,7 @@ npm install
 npm start
 ```
 
-Build a portable Windows executable with `npm run dist:win`. Output is in `dist/`.
+Build the Windows installer with `npm run dist:win`: it writes `dist/Mapino-Setup-<version>.exe`, which installs Mapino with Start menu and desktop shortcuts (you choose the folder). It bundles whatever maps you have built in `src/map/`, so run `npm run build:map` first. Those maps are Bohemia's game data: keep the installer for your own use.
 
 ## Offline maps
 
@@ -53,7 +53,7 @@ A small **server-side mod** (`tools/export-mod`) reads what the unencrypted file
 - **Place search**: every named place in the world config (cities, villages, local names, ruins, bays, hills). Type a name in the search box to jump there.
 - **Exact terrain**: the game's ground height every 10 m, replacing the normal-map estimate in 3D and in the cursor readout (8 m grid in 2D).
 - **Roads (surveyed)**: wherever the game has a road surface underfoot, sampled every 4 m. Paved roads are dark grey, gravel and dirt brown, and building floors are left out.
-- **Building outlines**: the true footprint and rotation of every building and larger structure, shown once zoomed in.
+- **Building outlines and 3D buildings**: the true footprint and rotation of every building and larger structure, shown once zoomed in. In 3D they stand as blocks at their real roof height (the game's own height above sea level plus the model's box), coloured like the loot layers (military red, police blue, medical white, fire orange; plain buildings stone, walls and sheds grey), with loot markers on the roofs. They load only when 3D opens (`blocks.js`, 1-3 MB per map) and draw as one instanced mesh. These are boxes, not the game's models: those are in Bohemia's binarized model format.
 - **Forest**: tree density from every tree and bush.
 - **Wells & water** and **Fuel pumps**: the objects the game itself lets you drink from or refuel at.
 - **Powerlines** and **Road signs**, as before.
@@ -67,9 +67,53 @@ Run one server at a time. The Chernarus export peaks at over 6 GB of memory, and
 
 The export files are plain text. `<world>_shapes.txt` counts every model the sweep saw and `<world>_surfaces.txt` lists every ground surface name, so the road and object filters can be checked.
 
+## Picture capture (for "where am I")
+
+The first step towards finding your position from a screenshot: a camera walks a grid of points across a map and takes a picture per heading at each one, each saved with its exact position. It runs offline in `DayZDiag_x64.exe` (installed with DayZ), so no server, BattlEye or mod signing is involved. It needs the world export above.
+
+```powershell
+npm run capture:plan -- nasdara --quick    # 100 m everywhere: ~26,000 points
+npm run capture:plan -- nasdara            # 25 m in towns, 50 m along roads, 100 m elsewhere: ~113,000 points
+npm run capture:run -- nasdara             # starts the game, takes the pictures, quits when done
+```
+
+- **Plan** (`tools/capture.js`): picks the points from the export: spacing by ground kind, nothing at sea, each point moved up to 8 m out of buildings and rocks, rows walked alternately east and west so each step is short. It writes `@NasdaraCapture\NasdaraCapture.<world>\` (the mission and `plan.txt`). `--area x0,z0,x1,z1` and `--limit n` make small test plans. `--headings`, `--fov`, `--settle`, `--turn`, `--hour`, `--overcast` and `--view` change the camera, timing, light and view distance.
+- **Mission** (`tools/capture-mission/init.c`): with the HUD hidden, and fixed clock and weather, it moves the camera, waits for the spot to stream in, turns through the headings and asks for each picture. The game's own screenshot call writes nothing in this build, so each picture is taken from outside.
+- **Pictures** (`tools/capture-shooter.html`): `capture:run` streams the game window and saves each requested frame as a 640 × 360 JPEG in `captures\<world>\img\` (about 45 KB each), with its position and heading in `captures\<world>\shots.csv`. Other windows can cover the game while it runs, but don't minimise it.
+
+A run reports progress, frame rate and time left as `[NasdaraCapture]` lines in `C:\dzcapture\script_*.log`. After loading, it takes about 1.8 s per point at 6 headings. If the game crashes, closes, or saves no picture for 5 minutes, `capture:run` restarts it from the last point (it gives up after 10 restarts in a row without a new picture). A black frame from a minimised window, a locked screen or sleep is never saved: the run waits for the game to show again. For an overnight run, set Windows to never sleep or turn off the screen. If you stop it, run `capture:run` again to carry on from the last point. Passes add up: points already in `shots.csv` are left out, so the full plan after a quick pass captures only the new points. Like the export, the pictures are Bohemia's game data: keep them for your own use.
+
+## Where am I
+
+Once there are pictures, Mapino can find your spot from a screenshot. It compares the screenshot with every captured picture using a place-recognition model, and runs offline on your graphics card.
+
+```powershell
+npm run places:setup                 # once: Python 3.13 environment with PyTorch (about 4.5 GB, in .runtime\py)
+npm run places:build -- nasdara      # pictures -> src\map\nasdara\places\ (model + index)
+npm run places:eval -- nasdara       # how close it gets, measured on the pictures themselves
+```
+
+- **Build** (`tools/places.py`): turns every picture into a descriptor (512 numbers) and writes `index.bin` (int8, about 80 MB for the 100 m pass), `index.json` (each picture's spot and heading) and `model.onnx`. The model handles normalisation and any compression itself, so the app only feeds it pixels. The default model is [EigenPlaces](https://github.com/gmberton/EigenPlaces) (ResNet50, MIT, 98 MB). `--model megaloc` uses [MegaLoc](https://github.com/gmberton/MegaLoc) (DINOv2, MIT): often more accurate, but a 915 MB model, and its 8448 numbers are cut to `--dim` by a PCA fitted on your pictures. The build checks that the exported model gives the same results as PyTorch.
+- **Search** (`src/places.js`, `src/locator.js`): the screenshot is cropped the way the pictures were: centred to 16:9, with the bottom 30% dropped (hands, weapon, status icons). Each captured spot scores its best-matching heading, and the answer is the best spot's neighbourhood averaged by score, so it can land between grid points. It reports a radius, the direction you face, how sure it is, and other possible spots. Several screenshots from one spot, turning between them, add up and narrow it down. Each search takes about 40 ms after the model loads.
+- **Evaluate** (`tools/places-eval.js`): each sampled spot's pictures are searched with that spot hidden from the index, so the answer must come from neighbours a grid spacing away. That makes it a stricter test than a real screenshot. It reports errors for one screenshot and for three taken while turning, plus the facing error. `--sharpness` and `--cluster` try other values for the search's two constants.
+
+In Mapino: press **Ctrl+Alt+L** in game (the game is captured before Mapino shows), click the target button in the title bar, paste a screenshot (**Ctrl+V**, for example after Win+Shift+S), or drop image files on the map. **Ctrl+Alt+Shift+L** or **Add a view** adds another view from the same spot. The answer is drawn as a circle with a cone for your facing, with other possible spots ringed. The game must be windowed or borderless for Mapino to see it; with exclusive fullscreen, paste a screenshot instead. The capture uses your own field of view (`fov=` in `<name>_settings.DayZProfile`), so screenshots match the pictures best at that setting.
+
+## DayZ server
+
+The server button in the title bar opens a form that sets up a DayZ server on this PC (`src/server.js`, `src/map/server.js`). You need **DayZ Server** installed (Steam → Library → Tools). Pick a map, a name, passwords, player count and the mods to run; the mods listed are the ones the game has downloaded from the Steam Workshop. **Save setup** writes everything into the server's folder:
+
+- `serverDZ-<setup>.cfg`: your `serverDZ.cfg` with the form's values filled in. Every other setting and comment is kept.
+- `start-<setup>.bat`: launches the server with the mods and restarts it every few hours. It's the usual `server.bat`.
+- `@<Mod>`: each chosen mod is linked (a junction) to its workshop download, so Steam updates reach the server too. An old copied folder is moved to `mapino-old-mods\` rather than deleted. Mods load frameworks first (CF, then anything named framework, core or library).
+- `keys\`: every `.bikey` the mods ship.
+- VPP Admin Tools, when it is one of the mods: `SuperAdmins.txt` and the members of each group in `UserGroups.json` (the groups' permissions are left alone), plus the VPP password in `credentials.txt` (VPP replaces it with a hash on the next start). Your Steam accounts on this PC are offered as admins, or you can type a Steam64 ID.
+
+**Start** saves, then runs the .bat in its own window, which keeps going after Mapino closes. **Stop** closes it. **Join** opens DayZ straight into the server with the same mods. Friends joining from outside your network need UDP ports 2302–2305 forwarded on your router. Some mods also need their items added to the map's `types.xml`; the form doesn't do that.
+
 ## Controls
 
-The window is just the map: a borderless window with a close button (×) and a move grip (⠿) at the top right. Drag the window edges to resize; position and size are remembered.
+The window is a borderless map with a title bar in the style of Whispra (graphite, Geist type, dark or light theme). Drag the bar to move the window. In the bar: search, the map tabs (Nasdara, Chernarus, Frostline), 2D | 3D, Layers, the light/dark theme, full screen (F11), minimize and close. Drag the window edges to resize; position and size are remembered. The Geist fonts are bundled in `src/map/fonts` under the SIL Open Font License.
 
 Global keys work while DayZ or another app has focus. Numpad keys need **Num Lock on**.
 
@@ -81,6 +125,8 @@ Global keys work while DayZ or another app has focus. Numpad keys need **Num Loc
 | Numpad 9 / 7 | Zoom in / out |
 | Ctrl+Alt+M | Show / hide without taking focus |
 | Ctrl+Alt+T | Toggle mouse click-through |
+| Ctrl+Alt+L | Where am I: locate from the game picture (new spot) |
+| Ctrl+Alt+Shift+L | Where am I: add a view from the same spot |
 
 The numpad keys are captured system-wide only while the map is visible; hiding it (Ctrl+Alt+M) gives them back to the game. Pan directions follow the screen, so they stay intuitive when the map is rotated. Click the compass (bottom right) to reset north up. The tray menu can reopen the window and turn off click-through. Closing the window exits the app.
 
@@ -92,7 +138,7 @@ The app uses plain HTML/CSS/JavaScript and one local canvas map, without a UI fr
 
 Electron's Chromium runtime still uses memory; this is not a native map engine, and no fixed RAM/CPU target is promised. Hardware acceleration stays enabled to avoid pushing map rendering onto the CPU.
 
-The map runs sandboxed without Node.js access; its preload only exposes closing the window and receiving map commands. All navigation and popups are blocked, and the only permission granted is writing copied coordinates to the clipboard.
+The map runs sandboxed without Node.js access; its preload only exposes the window controls, map commands and the Where am I search (which runs in the main process). All navigation and popups are blocked, and the only permission granted is writing copied coordinates to the clipboard.
 
 ## Verify
 

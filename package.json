@@ -1,17 +1,23 @@
 {
-  "name": "dayz-map-desk",
+  "name": "mapino",
+  "productName": "Mapino",
   "version": "1.0.0",
-  "description": "A lightweight offline DayZ map (Chernarus, Frostline, Nasdara) with global controls",
+  "description": "Mapino: offline DayZ maps (Chernarus, Frostline, Nasdara) with 3D buildings and global controls",
   "main": "src/main.js",
-  "author": "DayZ Map Desk",
+  "author": "Mapino",
   "license": "MIT",
   "scripts": {
     "start": "electron .",
     "build:map": "electron tools/build-map.js",
     "build:nasdara": "electron tools/build-map.js nasdara",
     "pack:export-mod": "node tools/pack-mod.js",
+    "capture:plan": "node tools/capture.js plan",
+    "capture:run": "electron tools/capture.js run",
+    "places:setup": "py -3.13 -m venv .runtime/py && .runtime\\py\\Scripts\\python -m pip install -r tools/places-requirements.txt --extra-index-url https://download.pytorch.org/whl/cu128",
+    "places:build": ".runtime\\py\\Scripts\\python tools/places.py build",
+    "places:eval": "node tools/places-eval.js",
     "test": "node --test --test-isolation=none",
-    "dist:win": "electron-builder --win portable"
+    "dist:win": "electron-builder --win nsis"
   },
   "devDependencies": {
     "electron": "^42.0.0",
@@ -19,17 +25,34 @@
     "three": "^0.150.1"
   },
   "build": {
-    "appId": "local.dayz.mapdesk",
-    "productName": "DayZ Map Desk",
+    "appId": "local.mapino.app",
+    "productName": "Mapino",
+    "icon": "build/icon.png",
     "files": [
       "src/**/*",
-      "package.json"
+      "package.json",
+      "!node_modules/onnxruntime-node/bin/napi-v*/{linux,darwin}/**"
     ],
     "win": {
-      "target": "portable"
+      "target": "nsis",
+      "icon": "build/icon.png",
+      "artifactName": "Mapino-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Mapino",
+      "runAfterFinish": true
     },
     "directories": {
-      "output": "dist"
+      "output": "dist",
+      "buildResources": "build"
     }
+  },
+  "dependencies": {
+    "onnxruntime-node": "^1.30.0"
   }
 }

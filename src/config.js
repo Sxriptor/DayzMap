@@ -2,6 +2,8 @@
 const SHORTCUTS = {
   toggle: ['Show / hide', 'Control+Alt+M'],
   clickThrough: ['Click-through', 'Control+Alt+T'],
+  locate: ['Where am I (new spot)', 'Control+Alt+L'],
+  locateMore: ['Where am I (add a view from the same spot)', 'Control+Alt+Shift+L'],
   up: ['Pan up', 'num8'],
   left: ['Pan left', 'num4'],
   right: ['Pan right', 'num6'],

@@ -7,4 +7,6 @@ src/map/chernarusplus/
 src/map/sakhal/
 src/map/maps.js
 @NasdaraExport/
+@NasdaraCapture/
+captures/
 exports/

@@ -11,7 +11,7 @@ const { extractLabels, packAtlas } = require('./labels');
 const { contourStrength, mainRoads } = require('./topo');
 const { buildHeights, shade, upsample } = require('./terrain');
 const { parseExport, powerlines, signs } = require('./objects');
-const { exportFiles, parseWorld, parseTable, parseTerrain, resampleHeights, outlines, roadRaster, vegetationDensity, usePoints } = require('./worldexport');
+const { exportFiles, parseWorld, parseTable, parseTerrain, resampleHeights, outlines, blocks, roadRaster, vegetationDensity, usePoints } = require('./worldexport');
 const { satelliteTiles } = require('./satellite');
 
 // Each map: display name, world size (m), its addon folder under DayZ, the paper map texture (Chernarus has none:
@@ -23,9 +23,8 @@ const MAPS = {
   chernarusplus: { name: 'Chernarus', size: 15360, dir: 'Addons', paper: null, normals: 'global_nohq.paa' },
   sakhal: { name: 'Frostline (Sakhal)', size: 15360, dir: 'sakhal/addons', paper: 'map_unfolded_sakhal_co.paa', normals: 'sakhal_global_nohq.paa' }
 };
-// Base map and overlay images are BASE px across (tiles of TILE px); each building is STRIDE numbers:
-// type index, x, z, tier bits, area usage bits.
-const BASE = 4096, TILE = 512, STRIDE = 5;
+// Each building is STRIDE numbers: type index, x, z, tier bits, area usage bits. (Image sizes are per map: see build.)
+const STRIDE = 5;
 const MAP_ROOT = path.join(__dirname, '..', 'src', 'map');
 const USAGES = ['Military', 'Police', 'Medic', 'Firefighter', 'Industrial', 'Farm', 'Coast', 'Town', 'Village', 'Hunting',
   'Office', 'School', 'Prison', 'Lunapark', 'SeasonalEvent', 'ContaminatedArea', 'Historical', 'MilitaryEast', 'MilitaryWest'];
@@ -125,6 +124,10 @@ function gradients(h, n, cell) {
 
 function build(id, dayz) {
   const map = MAPS[id], SIZE = map.size, OUT = path.join(MAP_ROOT, id);
+  // Base map and overlay images are BASE px across (4 m/px) in tiles of TILE px (1/32 of the map), so every tile
+  // level, satellite included, has exactly twice the tiles of the one before: 2/4/8/16/32 across. Nasdara (16384 m)
+  // uses 4096 px and 512 px tiles; Chernarus and Sakhal (15360 m) 3840 px and 480 px tiles.
+  const BASE = SIZE / 4, TILE = SIZE / 32;
   const addons = path.join(dayz, map.dir);
   console.log(`\n== ${map.name}: reading ${addons}`);
   fs.rmSync(OUT, { recursive: true, force: true });
@@ -187,9 +190,8 @@ function build(id, dayz) {
   // upright) and its contour lines and main roads redrawn as overlays. Without a paper map: drawn from the terrain.
   let labels = [], mainroads = false;
   if (map.paper && !map.lift) {
-    const paper = readPaa(dataPbo.read(map.paper)).decode(0);
-    if (paper.w !== BASE) throw new Error(`${map.paper} is ${paper.w} px, expected ${BASE}`);
-    pyramid(toImage(paper.rgba, BASE, BASE), 'tiles');
+    const paper = readPaa(dataPbo.read(map.paper)).decode(0), image = toImage(paper.rgba, paper.w, paper.h);
+    pyramid(paper.w === BASE ? image : image.resize({ width: BASE, quality: 'best' }), 'tiles');
     overlay('contours', drawnContours(BASE, heights, water));
     fs.writeFileSync(path.join(OUT, 'labels.png'), toImage(Buffer.alloc(4), 1, 1).toPNG());
     console.log(`paper map as printed, contours from the ${exact ? 'exported' : 'estimated'} terrain`);
@@ -211,7 +213,7 @@ function build(id, dayz) {
     labels = sprites.map((sp, i) => [round((sp.x + sp.w / 2) * k), round(SIZE - (sp.y + sp.h / 2) * k), pack.at[i][0], pack.at[i][1], sp.w, sp.h]);
     console.log(`labels ${labels.length}, atlas ${pack.width}x${pack.height}`);
   } else {
-    const forest = vegetation && (p => vegetation.density[Math.floor(Math.floor(p / BASE) / 4) * 1024 + Math.floor((p % BASE) / 4)]);
+    const forest = vegetation && (p => vegetation.density[Math.floor(Math.floor(p / BASE) * 1024 / BASE) * 1024 + Math.floor((p % BASE) * 1024 / BASE)]);
     pyramid(toImage(drawnBase(SIZE, BASE, heights, water, forest), BASE, BASE), 'tiles');
     overlay('contours', drawnContours(BASE, heights, water));
     fs.writeFileSync(path.join(OUT, 'labels.png'), toImage(Buffer.alloc(4), 1, 1).toPNG());
@@ -381,6 +383,13 @@ function build(id, dayz) {
     console.log(`exported objects ${objects.length}: powerline spans ${power.segments.length}, poles ${power.poles.length}, signs ${signList.length}`);
     if (objects.some(o => Array.isArray(o.b))) {
       outlineList = outlines(objects).flat(); uses = usePoints(objects);
+      // 3D buildings (loaded only when the 3D view opens): category = the Central Economy layer of a loot building
+      // matched by class name, else a plain building or other structure (walls, sheds, towers).
+      const kinds = ['structure', 'building', 'civilian', 'military', 'police', 'medical', 'fire', 'hunting', 'industrial', 'wreck'];
+      const kindOf = o => { const t = types[typeIndex[o.t]]; return t ? Math.max(2, kinds.indexOf(t.layer)) : o.k === 'b' ? 1 : 0; };
+      const list = blocks(objects, kindOf);
+      fs.writeFileSync(path.join(OUT, 'blocks.js'), `window.MAP_BLOCKS=${JSON.stringify({ stride: 7, kinds, data: list })};\n`);
+      console.log(`3D buildings ${list.length / 7} (${(fs.statSync(path.join(OUT, 'blocks.js')).size / 1048576).toFixed(1)} MB)`);
       console.log(`outlines ${outlineList.length / 5}, water sources ${uses.water.length}, fuel pumps ${uses.fuel.length}`);
     }
     if (exported.has('world.json')) {
@@ -417,7 +426,7 @@ function build(id, dayz) {
   const data = { id, name: map.name, size: SIZE, tile: TILE, levels, satLevels, paper: !!map.paper, mainroads, labels, labelScale: SIZE / BASE,
     terrain: { size: terrain.n, low: Math.round(low), high: Math.round(high), exact: !!exact, fine: exact ? FINE : 0 }, usages: USAGES, stride: STRIDE,
     types, buildings, items, events, zones, spawns, zoneTypes, infected, animals, underground, power, signs: signList,
-    places, outlines: outlineList, uses, roadnet, forest };
+    places, outlines: outlineList, blocks: !!outlineList, uses, roadnet, forest };
   fs.writeFileSync(path.join(OUT, 'data.js'), `window.MAP_DATA=${JSON.stringify(data)};\n`);
   console.log(`data.js ${(fs.statSync(path.join(OUT, 'data.js')).size / 1024).toFixed(0)} KB -> ${OUT}`);
 }

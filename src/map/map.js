@@ -153,7 +153,7 @@ function drawWhole(img) {
 function draw() {
   pending = false; frame++;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+  ctx.clearRect(0, 0, W, H); // the window colour shows around the map
   ctx.translate(W / 2, H / 2); ctx.rotate(view.r); ctx.translate(-W / 2, -H / 2);
   // Pick the smallest tile level that is sharp at this zoom; level 0 underneath while it loads.
   const level = levelFor(baseKind()), overlay = levelFor('contours');
@@ -204,6 +204,7 @@ function draw() {
   if (selection?.kind === 'place') ring(selection.x, selection.z, r + 8, '#ffcf3f');
   if (selection) for (const i of selection.buildings) { ring(b[i * S + 1], b[i * S + 2], r + 3, '#ffcf3f'); marker(b[i * S + 1], b[i * S + 2], r * 0.8, buildingIcon(data.types[b[i * S]]), '#ffcf3f'); }
   if (hover) ring(hover.x, hover.z, r + 5, '#fff');
+  drawLocated();
   drawLabels();
   if (!in3d) userPins?.render(pinScreen, toWorld);
 }
@@ -381,6 +382,60 @@ function select(hit) {
   $('selection').hidden = false; $('results').hidden = true; $('query').blur();
   redraw(); if (in3d) window.Map3D.selectionChanged();
 }
+// Where am I (src/locator.js through window.desk): the answer as a circle with a cone for the facing, other
+// likely spots as faint rings, and the #located card. Screenshots come from the game window (button or
+// Ctrl+Alt+L in game), a paste or a drop; "Add a view" combines another view from the same spot.
+let located = null, locating = false;
+const COMPASS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+const LOCATED = '#FF7A45';
+function drawLocated() {
+  if (!located) return;
+  for (const c of located.candidates.slice(1)) if (c.share >= 0.05) ring(c.x, c.z, 9, `${LOCATED}99`);
+  const [sx, sy] = toScreen(located.x, located.z), r = Math.max(10, located.radius * view.s);
+  // Facing: a 60° cone (about what one screenshot shows), compass heading clockwise from north (up).
+  const h = located.heading * Math.PI / 180 - Math.PI / 2, reach = Math.max(34, r * 1.5);
+  ctx.beginPath(); ctx.moveTo(sx, sy); ctx.arc(sx, sy, reach, h - Math.PI / 6, h + Math.PI / 6); ctx.closePath();
+  ctx.fillStyle = `${LOCATED}55`; ctx.fill();
+  ctx.beginPath(); ctx.arc(sx, sy, r, 0, 7);
+  ctx.fillStyle = `${LOCATED}2e`; ctx.fill(); ctx.strokeStyle = '#000'; ctx.lineWidth = 4; ctx.stroke();
+  ctx.strokeStyle = LOCATED; ctx.lineWidth = 2; ctx.stroke();
+  dot(located.x, located.z, 5, LOCATED);
+}
+function showLocated(result) {
+  const card = $('located');
+  card.hidden = false;
+  card.classList.toggle('busy', !!result.busy); card.classList.toggle('error', !!result.error);
+  $('locateMore').hidden = !!result.busy || !!result.error || !located;
+  $('locate').classList.toggle('busy', !!result.busy);
+  if (result.busy) { $('locatedTitle').textContent = 'Looking…'; $('locatedText').textContent = 'Comparing the screenshot with the captured pictures.'; return; }
+  if (result.error) { $('locatedTitle').textContent = "Couldn't locate"; $('locatedText').textContent = result.error; return; }
+  located = result;
+  $('locateMore').hidden = false;
+  const others = result.candidates.slice(1).filter(c => c.share >= 0.05).length;
+  $('locatedTitle').textContent = `X ${result.x}  Y ${result.z}`;
+  $('locatedText').textContent = [
+    `Within about ${result.radius} m, facing ${COMPASS[Math.round(result.heading / 45) % 8]} (${Math.round(result.heading)}°).`,
+    `${Math.round(result.confidence * 100)}% sure from ${result.views} view${result.views === 1 ? '' : 's'}.`,
+    others ? `${others} other possible spot${others === 1 ? '' : 's'} ringed.` : '',
+    result.confidence < 0.7 ? 'Turn on the spot and add a view to narrow it down.' : ''
+  ].filter(Boolean).join(' ');
+  if (in3d) window.Map3D.focus(result.x, result.z);
+  else { view.x = result.x; view.z = result.z; view.s = Math.max(view.s, Math.min(W, H) / Math.max(1500, result.radius * 8)); clampView(); saveView(); }
+  redraw();
+}
+async function locate(request = {}) {
+  if (!window.desk?.locate || locating) return;
+  locating = true; showLocated({ busy: true });
+  const result = await window.desk.locate({ map: MAP_ID, ...request }).catch(error => ({ error: error.message }));
+  locating = false; showLocated(result);
+}
+// Screenshots handed over as files: the first starts a spot, any more join it.
+async function locateFiles(files) {
+  const images = [...files].filter(f => f.type.startsWith('image/'));
+  for (const [i, file] of images.entries()) await locate({ image: await file.arrayBuffer(), add: i > 0 });
+}
+function clearLocated() { located = null; $('located').hidden = true; redraw(); }
+
 // "NameCityCapital" -> "city capital", "NameMarine" -> "marine", "Hill" -> "hill".
 const placeType = type => (type.replace(/^Name/, '').replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase() || 'place');
 let results = [], active = 0;
@@ -400,12 +455,14 @@ function showResults() {
 
 function buildLayerList() {
   const list = $('layerList');
-  const heading = document.createElement('h3'); heading.textContent = 'BASE MAP'; list.append(heading);
+  // The base map as a segmented control (styled from the radios inside).
+  const heading = document.createElement('h3'); heading.textContent = 'Base map'; list.append(heading);
+  const bases = document.createElement('div'); bases.className = 'seg'; bases.setAttribute('role', 'radiogroup'); list.append(bases);
   for (const [id, label] of BASES) {
     const row = document.createElement('label'), radio = document.createElement('input');
     radio.type = 'radio'; radio.name = 'base'; radio.checked = base === id;
     radio.addEventListener('change', () => { base = id; store.set(`${MAP_ID}-base`, base); redraw(); if (in3d) window.Map3D.layersChanged('base'); });
-    row.append(radio, label); list.append(row);
+    row.append(radio, label.replace(/ map$/, '')); bases.append(row);
   }
   for (const [group, items] of LAYERS) {
     const h = document.createElement('h3'); h.textContent = group.toUpperCase(); list.append(h);
@@ -504,7 +561,7 @@ $('fullscreen').addEventListener('click', toggleFullscreen);
 addEventListener('keydown', e => { if (e.key === 'F11') { e.preventDefault(); toggleFullscreen(); } });
 if (!data) $('missing').hidden = false;
 else {
-  document.title = `${data.name} · Offline map`;
+  document.title = `${data.name} · Mapino`;
   view = { x: data.size / 2, z: data.size / 2, s: 0, r: 0, ...store.get(`${MAP_ID}-view`) };
   base = BASES.some(([id]) => id === store.get(`${MAP_ID}-base`)) ? store.get(`${MAP_ID}-base`) : 'paper';
   // Saved choices over the defaults, so layers added since (e.g. after an export) start at their default.
@@ -519,7 +576,9 @@ else {
   reliefImage = new Image(); reliefImage.onload = redraw; reliefImage.src = `${ROOT}relief.png`;
   if (data.forest) { forestImage = new Image(); forestImage.onload = redraw; forestImage.src = `${ROOT}forest.png`; }
   loadHeights();
-  $('toggle3d').addEventListener('click', toggle3d);
+  // 2D | 3D segmented control: each button selects its own view.
+  $('toggle3d').addEventListener('click', () => { if (!in3d) toggle3d(); });
+  $('view2d').addEventListener('click', () => { if (in3d) toggle3d(); });
   userPins = window.MapPins.mount({ size: data.size, saved: store.get(`${MAP_ID}-pins`),
     persist: points => store.set(`${MAP_ID}-pins`, points),
     onChange: () => { redraw(); if (in3d) window.Map3D.pinsChanged(); } });
@@ -564,8 +623,26 @@ else {
     else if (e.key === 'Escape') $('query').blur();
   });
   $('clearSelection').addEventListener('click', () => select(null));
+  window.desk?.places?.(MAP_ID).then(ready => { $('locate').hidden = !ready; }).catch(() => {});
+  window.desk?.onLocated?.(showLocated);
+  $('locate').addEventListener('click', () => locate());
+  $('locateAgain').addEventListener('click', () => locate());
+  $('locateMore').addEventListener('click', () => locate({ add: true }));
+  $('closeLocated').addEventListener('click', clearLocated);
+  addEventListener('paste', e => {
+    const files = [...(e.clipboardData?.items || [])].filter(i => i.kind === 'file').map(i => i.getAsFile());
+    if (files.some(f => f?.type.startsWith('image/'))) { e.preventDefault(); locateFiles(files); }
+  });
+  const hasFiles = e => [...(e.dataTransfer?.types || [])].includes('Files');
+  addEventListener('dragover', e => { if (hasFiles(e)) { e.preventDefault(); document.body.classList.add('drop-target'); } });
+  addEventListener('dragleave', e => { if (!e.relatedTarget) document.body.classList.remove('drop-target'); });
+  addEventListener('drop', e => {
+    document.body.classList.remove('drop-target');
+    if (!hasFiles(e)) return;
+    e.preventDefault(); locateFiles(e.dataTransfer.files);
+  });
   addEventListener('keydown', e => {
-    if (e.target === $('query')) return;
+    if (e.target.closest?.('input, select, textarea')) return; // typing in the search box or the server panel
     if (e.key === 'Escape') select(null);
     else if (e.key === '/' || (e.shiftKey && e.key === 'Q')) { e.preventDefault(); $('query').focus(); }
     else if (e.ctrlKey && e.key === 'c' && !getSelection().toString()) {

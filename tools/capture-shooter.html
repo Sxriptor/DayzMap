@@ -1,0 +1,101 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Capture</title>
+<video autoplay muted></video>
+<canvas></canvas>
+<script>
+// Takes the pictures for tools/capture-mission (opened hidden by `npm run capture:run`): streams the DayZDiag
+// window and, each time the mission writes shot.txt, saves the next fresh frame of the game area as a JPEG in
+// captures/<world>/img, appends the picture's line to captures/<world>/shots.csv and deletes shot.txt.
+// A black frame (window minimised, screen locked or asleep) is never saved: shot.txt stays, the mission keeps
+// waiting, and the picture is taken once the window shows the game again.
+const fs = require('node:fs');
+const path = require('node:path');
+const { ipcRenderer } = require('electron');
+
+const query = new URLSearchParams(location.search);
+const shot = query.get('shot'), dest = query.get('dest'), width = +query.get('width');
+const csv = path.join(dest, 'shots.csv');
+let crop = query.get('crop').split(',').map(Number); // the game area as fractions of the window: x, y, w, h
+ipcRenderer.on('crop', (_, next) => { crop = next; });
+
+const video = document.querySelector('video'), canvas = document.querySelector('canvas');
+const context = canvas.getContext('2d');
+const seen = new Set(fs.readFileSync(csv, 'utf8').split(/\r?\n/).map(line => line.split(',')[0]));
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+// The mission asks only once the camera has settled on a heading; this short wait lets the stream catch up
+// with that frame (frame callbacks never fire in a hidden window, so they cannot be waited on).
+const STREAM_LAG_MS = 30;
+// Now and then the stream is later than that: a frame that still matches the previous picture is the old view,
+// so it is grabbed again (two different headings never look alike at 32 x 18).
+const probe = document.createElement('canvas');
+probe.width = 32;
+probe.height = 18;
+const probeContext = probe.getContext('2d', { willReadFrequently: true });
+let previous = null;
+function signature(x, y, w, h) {
+  probeContext.drawImage(video, x, y, w, h, 0, 0, probe.width, probe.height);
+  return probeContext.getImageData(0, 0, probe.width, probe.height).data;
+}
+const isBlack = view => {
+  let sum = 0;
+  for (let i = 0; i < view.length; i += 4) sum += view[i] + view[i + 1] + view[i + 2];
+  return sum / (view.length / 4 * 3) < 4;
+};
+function sameView(a, b) {
+  let sum = 0;
+  for (let i = 0; i < a.length; i += 4) sum += Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2]);
+  return sum / (a.length / 4 * 3) < 2;
+}
+
+async function take() {
+  let line;
+  try { line = fs.readFileSync(shot, 'utf8').trim(); } catch { return; }
+  const fields = line.split(',');
+  if (fields.length < 7) return; // still being written
+  await sleep(STREAM_LAG_MS);
+  const [x, y, w, h] = [crop[0] * video.videoWidth, crop[1] * video.videoHeight, crop[2] * video.videoWidth, crop[3] * video.videoHeight];
+  let view = signature(x, y, w, h);
+  if (isBlack(view)) {
+    ipcRenderer.send('blocked');
+    await sleep(1000);
+    return;
+  }
+  // Up to 3 s for a new view; past that the two headings really do look alike (a blank wall), so it is saved.
+  for (let tries = 0; previous && sameView(view, previous) && tries < 120; tries++) {
+    await sleep(25);
+    view = signature(x, y, w, h);
+  }
+  previous = view;
+  canvas.width = width;
+  canvas.height = Math.round(width * h / w);
+  context.imageSmoothingQuality = 'high';
+  context.drawImage(video, x, y, w, h, 0, 0, canvas.width, canvas.height);
+  // toDataURL, not toBlob: a hidden window runs toBlob's encoder at idle priority, up to a second late.
+  const jpeg = Buffer.from(canvas.toDataURL('image/jpeg', 0.85).split(',')[1], 'base64');
+  fs.writeFileSync(path.join(dest, 'img', fields[0] + '.jpg'), jpeg);
+  // A point restarted after a stop is shot again: the picture is replaced, its line written once.
+  if (!seen.has(fields[0])) fs.appendFileSync(csv, line + '\n');
+  seen.add(fields[0]);
+  for (let tries = 0; tries < 20; tries++) {
+    try { fs.unlinkSync(shot); break; } catch { await sleep(10); } // the game may still hold it open
+  }
+  ipcRenderer.send('saved', fields[0]);
+}
+
+(async () => {
+  try {
+    video.srcObject = await navigator.mediaDevices.getUserMedia({ audio: false, video: { mandatory: {
+      chromeMediaSource: 'desktop', chromeMediaSourceId: query.get('source'), maxWidth: 3840, maxHeight: 2160, maxFrameRate: 60 } } });
+    await video.play();
+  } catch (error) {
+    ipcRenderer.send('failed', `cannot stream the DayZ window: ${error.message}`);
+    return;
+  }
+  ipcRenderer.send('ready', `${video.videoWidth} x ${video.videoHeight}`);
+  for (;;) {
+    if (fs.existsSync(shot)) await take();
+    else await sleep(15);
+  }
+})();
+</script>

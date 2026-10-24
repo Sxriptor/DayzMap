@@ -30,10 +30,16 @@ window.Map3D = (() => {
     canvas = $('map3d');
     renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
     renderer.setPixelRatio(devicePixelRatio || 1);
-    scene = new THREE.Scene(); scene.background = new THREE.Color('#000');
+    scene = new THREE.Scene(); scene.background = new THREE.Color(getComputedStyle(document.documentElement).getPropertyValue('--win').trim() || '#000');
     camera = new THREE.PerspectiveCamera(50, 1, 10, 80000);
     // Unlit imagery retains the same colours and contrast as the 2D map.
     terrain = new THREE.Group(); scene.add(terrain);
+    // Lights for the 3D buildings only (the terrain imagery is unlit): sky fill plus a sun from the north-west.
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x6b5a48, 0.75));
+    const sun = new THREE.DirectionalLight(0xffffff, 0.7); sun.position.set(-0.6, 1, -0.4); scene.add(sun);
+    if (data.blocks) {
+      try { await script(`${ROOT}blocks.js`); buildBlocks(); } catch (error) { console.warn('3D buildings unavailable:', error.message); }
+    }
     await updateTexture();
     buildNames();
     bindInput();
@@ -178,6 +184,47 @@ window.Map3D = (() => {
       const patch = stale.shift(); disposePatch(patch); patches.delete(patch.key);
     }
   }
+  // 3D buildings from the world export (blocks.js): every building and larger structure as a box at its true
+  // footprint, rotation and roof height, one instanced mesh. Coloured like the 2D loot layers; plain buildings stone,
+  // walls and sheds grey. Each sinks to its lowest corner so slopes leave no gap.
+  const BLOCK_COLORS = { structure: '#a3a19b', building: '#ddd5c6', civilian: '#d2c3a6', military: '#c45a4f', police: '#5a82d0',
+    medical: '#f4f4f4', fire: '#e0773a', hunting: '#8ea35c', industrial: '#a08d6f', wreck: '#6f6f6f' };
+  const ROOF_CELL = 64;
+  let blocks = null, roofs = null;
+  function buildBlocks() {
+    const { stride, kinds, data: d } = window.MAP_BLOCKS, count = d.length / stride;
+    const geo = new THREE.BoxGeometry(1, 1, 1); geo.translate(0, 0.5, 0);
+    blocks = new THREE.InstancedMesh(geo, new THREE.MeshLambertMaterial(), count);
+    blocks.frustumCulled = false; // the instances spread far beyond the unit box's own bounds
+    const m = new THREE.Matrix4(), q = new THREE.Quaternion(), up = new THREE.Vector3(0, 1, 0), size = new THREE.Vector3(), color = new THREE.Color();
+    roofs = new Map();
+    for (let i = 0; i < count; i++) {
+      const [x, z, hw, hd, yaw, roof, kind] = d.slice(i * stride, (i + 1) * stride), c = Math.cos(yaw), s = Math.sin(yaw);
+      // Model x runs along (cos, -sin) and model z along (sin, cos) in world x, z.
+      let low = Infinity;
+      for (const [a, b] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) low = Math.min(low, heightAt(x + a * hw * c + b * hd * s, z - a * hw * s + b * hd * c));
+      // The roof is the game's own height above sea level; at least half a metre above the (coarser) ground here.
+      const bottom = low - 1, top = Math.max(heightAt(x, z) + 0.5, roof);
+      // three.js turns +x towards -z for a positive angle; scene z points south, so the heading turns by -yaw.
+      m.compose(toScene(x, z, bottom), q.setFromAxisAngle(up, -yaw), size.set(hw * 2, (top - bottom) * EXAGGERATION, hd * 2));
+      blocks.setMatrixAt(i, m); blocks.setColorAt(i, color.set(BLOCK_COLORS[kinds[kind]] || BLOCK_COLORS.building));
+      const key = `${Math.floor(x / ROOF_CELL)},${Math.floor(z / ROOF_CELL)}`;
+      if (!roofs.has(key)) roofs.set(key, []);
+      roofs.get(key).push([x, z, hw, hd, c, s, top]);
+    }
+    blocks.instanceMatrix.needsUpdate = true; blocks.instanceColor.needsUpdate = true;
+    scene.add(blocks);
+  }
+  // Highest roof over a point (so markers sit on top of buildings rather than inside them), or -Infinity.
+  function roofAt(x, z) {
+    if (!roofs || !layers.outlines) return -Infinity;
+    let top = -Infinity;
+    for (const [bx, bz, hw, hd, c, s, roof] of roofs.get(`${Math.floor(x / ROOF_CELL)},${Math.floor(z / ROOF_CELL)}`) || []) {
+      const dx = x - bx, dz = z - bz;
+      if (Math.abs(dx * c - dz * s) <= hw && Math.abs(dx * s + dz * c) <= hd) top = Math.max(top, roof);
+    }
+    return top;
+  }
   // Keep names upright and at the same readable screen size as the 2D view.
   function buildNames() {
     if (names) {
@@ -244,7 +291,7 @@ window.Map3D = (() => {
     }
     const pts = [], cols = [], groups = new Map();
     const add = (x, z, color, id) => {
-      const point = toScene(x, z, heightAt(x, z) + 6);
+      const point = toScene(x, z, Math.max(heightAt(x, z), roofAt(x, z)) + 6);
       const badge = markerBadges.get(id) || symbolBadges.get(id);
       if (badge) {
         if (!groups.has(id)) groups.set(id, []);
@@ -310,7 +357,9 @@ window.Map3D = (() => {
     if (!canvas || canvas.hidden) return;
     const w = innerWidth, h = innerHeight;
     if (canvas.width !== Math.round(w * renderer.getPixelRatio())) renderer.setSize(w, h, false);
-    camera.aspect = w / h; camera.updateProjectionMatrix();
+    // A near plane that follows the zoom keeps depth precise from street level to the whole map.
+    camera.aspect = w / h; camera.near = Math.max(1, Math.min(10, cam.dist / 40)); camera.updateProjectionMatrix();
+    if (blocks) blocks.visible = !!layers.outlines && effectiveScale() >= 0.06;
     placeCamera(); camera.updateMatrixWorld(); updateTerrain(); updateNameSizes();
     if (power) {
       // Convert pixels to world units at the camera target on every zoom.
@@ -324,7 +373,7 @@ window.Map3D = (() => {
   }
   const clamp = () => {
     cam.x = Math.min(SIZE, Math.max(0, cam.x)); cam.z = Math.min(SIZE, Math.max(0, cam.z));
-    cam.dist = Math.min(30000, Math.max(150, cam.dist)); cam.pitch = Math.min(1.5, Math.max(0.15, cam.pitch));
+    cam.dist = Math.min(30000, Math.max(40, cam.dist)); cam.pitch = Math.min(1.5, Math.max(0.15, cam.pitch));
   };
   // Moves the target by screen-relative amounts (right, up) in metres.
   function pan(right, up) {
